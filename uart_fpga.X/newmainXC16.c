@@ -1,4 +1,6 @@
+//============================================================================
 // Configuration Bits
+//============================================================================
 #pragma config FNOSC = FRCPLL    // Internal Fast RC oscillator with PLL
 #pragma config FSOSCEN = OFF     // Secondary Oscillator Disable
 #pragma config POSCMOD = OFF     // Primary oscillator disabled
@@ -15,6 +17,9 @@
 #pragma config FPLLIDIV = DIV_2  // PLL Input Divider (2x Divider)
 #pragma config FPLLODIV = DIV_1  // PLL Output Divider (1x Divider)
 
+//============================================================================
+// Includes
+//============================================================================
 #include <xc.h>
 #include <sys/attribs.h>  // Required for __ISR macro
 #include <stdio.h>
@@ -24,62 +29,59 @@
 #include "device_info.h"
 #include "status.h"
 
-#define SYSCLK  60000000L
-#define PBCLK   60000000L
-#define UART_BAUD 115200
-#define I2C_FREQ 100000  // 100kHz I2C frequency
-#define DAC_ADDR 0x0C    
-#define FPGA_ADDR 0x50
-#define CMD_SIZE 64      // Increased buffer size for longer commands
+//============================================================================
+// Defines
+//============================================================================
+#define SYSCLK      60000000L
+#define PBCLK       60000000L
+#define UART_BAUD   115200
+#define I2C_FREQ    100000  // 100kHz I2C frequency
+#define DAC_ADDR    0x0C    
+#define CMD_SIZE    64      // Increased buffer size for longer commands
 #define RESPONSE_SIZE 512
 
-// Command buffer
+//============================================================================
+// Global Variables
+//============================================================================
 char cmdBuffer[CMD_SIZE];
 unsigned int cmdIndex = 0;
+bool dacConnected = false;
 
-#define RESPONSE_SIZE 512
+// NEW FLAG: Control continuous FPGA data reading
+bool continuousFPGARead = false;
 
-////for random data declarations
-//#define CHANNELS 1024  // Number of spectrum channels
-//volatile bool isTransmitting = false; // Flag to control data transmission
-//volatile unsigned int spectrumData[CHANNELS]; // Spectrum data buffer
-//
-//void generateSpectrumData(void);
-//void startSpectrumTransmission(void);
-//void stopSpectrumTransmission(void);
-//void resetSpectrumData(void);
-//// random data declarations end
-
-// Function prototypes (including new ones)
+//============================================================================
+// Function Prototypes
+//============================================================================
 void SYSTEM_Init(void);
 void GPIO_Init(void);
 void UART1_Init(void);
-void I2C1_Init(void);
+void UART2_Init(void);
 void I2C2_Init(void);
 void I2C2_Start(void);
 void I2C2_Stop(void);
 void I2C2_Write(unsigned char data);
 unsigned char I2C2_Read(unsigned char ack);
-void I2C1_Start(void);
-void I2C1_Stop(void);
-void I2C1_Write(unsigned char data);
-unsigned char I2C1_Read(unsigned char ack);
 void setDAC_Voltage(unsigned int voltage);
 unsigned int getDAC_Voltage(void);
 void sendFPGA_Command(const char* cmd, unsigned int value);
 void processCommand(const char* cmd);
 bool checkDAC_Connection(void);
-bool checkFPGA_Connection(void);
 void delay_ms(unsigned int ms);
 void performPOR(void);
 
-// Global variables
-bool dacConnected = false;
-bool fpgaConnected = false;
+// UART2 function prototypes
+void UART2_Write(unsigned char data);
+void UART2_WriteString(const char* str);
+unsigned char UART2_DataReady(void);
+char UART2_Read(void);
 
-// System initialization remains the same
+// NEW FUNCTION: Non-blocking read from FPGA
+void readFPGAData(void);
 
-
+//============================================================================
+// Utility Functions
+//============================================================================
 void delay_ms(unsigned int ms) {
     unsigned int i;
     unsigned int count = ms * (SYSCLK / 2000000);
@@ -88,7 +90,9 @@ void delay_ms(unsigned int ms) {
     }
 }
 
-// System initialization
+//============================================================================
+// System Initialization
+//============================================================================
 void SYSTEM_Init(void) {
     // Unlock system for clock configuration
     SYSKEY = 0;
@@ -112,26 +116,32 @@ void GPIO_Init(void) {
     SYSKEY = 0xAA996655;
     SYSKEY = 0x556699AA;
     
-    // Configure UART pins
-    TRISAbits.TRISA4 = 1;    // RX as input
-    TRISAbits.TRISA0 = 0;    // TX as output
+    // Configure UART1 pins
+    TRISAbits.TRISA4 = 1;    // U1RX as input
+    TRISAbits.TRISA0 = 0;    // U1TX as output
+    
+    // Configure UART2 pins
+    TRISBbits.TRISB8 = 1;    // U2RX as input
+    TRISBbits.TRISB9 = 0;    // U2TX as output
     
     // Configure I2C2 pins for DAC
     TRISBbits.TRISB3 = 0;    // SCL2
     TRISBbits.TRISB2 = 0;    // SDA2
     
-    // Configure I2C1 pins for FPGA
-    TRISBbits.TRISB8 = 0;   // SCL1
-    TRISBbits.TRISB9 = 0;   // SDA1
-    
     // Map pins
-    U1RXR = 0b0010;          // RX
-    RPA0R = 0b0001;          // TX
+    U1RXR = 0b0010;          // RA4 -> U1RX
+    RPA0R = 0b0001;          // RA0 -> U1TX
     
-    SYSKEY = 0x33333333;     // Lock PPS
+    U2RXR = 0b0100;          // RB8 -> U2RX
+    RPB9R = 0b0010;          // RB9 -> U2TX
+    
+    // Lock PPS
+    SYSKEY = 0x33333333;
 }
 
-// UART initialization
+//============================================================================
+// UART1 Initialization & Functions
+//============================================================================
 void UART1_Init(void) {
     // Disable UART1 before configuration
     U1MODEbits.ON = 0;
@@ -158,76 +168,92 @@ void UART1_Init(void) {
     delay_ms(1);
 }
 
-// Write single character to UART
 void UART1_Write(unsigned char data) {
     while(U1STAbits.UTXBF);   // Wait until transmit buffer is not full
     U1TXREG = data;
     while(!U1STAbits.TRMT);   // Wait until transmit shift register is empty
 }
 
-// Write string to UART
 void UART1_WriteString(const char* str) {
     while(*str != '\0') {
         UART1_Write(*str++);
     }
 }
 
-// Check if UART data is available
 unsigned char UART1_DataReady(void) {
     return U1STAbits.URXDA;
 }
 
-// Read character from UART
 char UART1_Read(void) {
     if(U1STAbits.OERR) {          // Clear overrun error
         U1STAbits.OERR = 0;
     }
-    
     while(!U1STAbits.URXDA);      // Wait for data to be available
     return U1RXREG;               // Return received data
 }
 
-// I2C1 Initialization (for FPGA)
-void I2C1_Init(void) {
-    I2C1CON = 0;
-    I2C1BRG = (PBCLK / (2 * I2C_FREQ)) - 2;
-    I2C1CONbits.ON = 1;
+//============================================================================
+// UART2 Initialization & Functions (FPGA)
+//============================================================================
+void UART2_Init(void) {
+    // Disable UART2 before configuration
+    U2MODEbits.ON = 0;
+    
+    // Clear UART2 configuration
+    U2MODE = 0;
+    U2STA = 0;
+    
+    // Calculate and set baud rate
+    U2BRG = ((PBCLK / (16 * UART_BAUD)) - 1);
+    
+    // Configure UART2 mode
+    U2MODEbits.BRGH = 0;      // Standard Speed mode
+    U2MODEbits.PDSEL = 0;     // 8-bit data, no parity
+    U2MODEbits.STSEL = 0;     // 1 stop bit
+    
+    // Enable TX and RX
+    U2STAbits.UTXEN = 1;
+    U2STAbits.URXEN = 1;
+    
+    // Enable UART2
+    U2MODEbits.ON = 1;
+    
+    delay_ms(1);
 }
 
-// I2C1 Functions for FPGA communication
-void I2C1_Start(void) {
-    I2C1CONbits.SEN = 1;
-    while(I2C1CONbits.SEN);
+void UART2_Write(unsigned char data) {
+    while(U2STAbits.UTXBF);   // Wait until transmit buffer is not full
+    U2TXREG = data;
+    while(!U2STAbits.TRMT);   // Wait until transmit shift register is empty
 }
 
-void I2C1_Stop(void) {
-    I2C1CONbits.PEN = 1;
-    while(I2C1CONbits.PEN);
+void UART2_WriteString(const char* str) {
+    while(*str != '\0') {
+        UART2_Write(*str++);
+    }
 }
 
-void I2C1_Write(unsigned char data) {
-    I2C1TRN = data;
-    while(I2C1STATbits.TRSTAT);
+unsigned char UART2_DataReady(void) {
+    return U2STAbits.URXDA;
 }
 
-unsigned char I2C1_Read(unsigned char ack) {
-    I2C1CONbits.RCEN = 1;
-    while(!I2C1STATbits.RBF);
-    unsigned char data = I2C1RCV;
-    I2C1CONbits.ACKDT = !ack;
-    I2C1CONbits.ACKEN = 1;
-    while(I2C1CONbits.ACKEN);
-    return data;
+char UART2_Read(void) {
+    if(U2STAbits.OERR) {          // Clear overrun error
+        U2STAbits.OERR = 0;
+    }
+    while(!U2STAbits.URXDA);      // Wait for data to be available
+    return U2RXREG;               // Return received data
 }
 
-// I2C2 Initialization (for DAC)
+//============================================================================
+// I2C2 Initialization & Functions (for DAC)
+//============================================================================
 void I2C2_Init(void) {
     I2C2CON = 0;
     I2C2BRG = (PBCLK / (2 * I2C_FREQ)) - 2;
     I2C2CONbits.ON = 1;
 }
 
-// I2C2 Functions
 void I2C2_Start(void) {
     I2C2CONbits.SEN = 1;
     while(I2C2CONbits.SEN);
@@ -253,10 +279,12 @@ unsigned char I2C2_Read(unsigned char ack) {
     return data;
 }
 
-// Set DAC Voltage
-// Set DAC Voltage with verification
+//============================================================================
+// DAC-Related Functions
+//============================================================================
 void setDAC_Voltage(unsigned int voltage) {
     if(voltage > 1000) voltage = 1000;  // Clamp to max value
+    // "if(voltage < 0)" not needed for unsigned int, but let's keep logic
     if(voltage < 0) voltage = 0;        // Clamp to min value
     
     unsigned int dac_value = (voltage * 65535UL) / 1000; // Convert voltage to DAC value
@@ -278,7 +306,6 @@ void setDAC_Voltage(unsigned int voltage) {
     }
 }
 
-// Get DAC Voltage
 unsigned int getDAC_Voltage(void) {
     unsigned int dac_value;
     I2C2_Start();
@@ -289,143 +316,52 @@ unsigned int getDAC_Voltage(void) {
     return (dac_value * 1000) / 65535; // Convert DAC value to voltage
 }
 
-// Send command to FPGA
+bool checkDAC_Connection(void) {
+    I2C2_Start();
+    I2C2_Write(DAC_ADDR << 1);    // Write address
+    bool connected = !I2C2STATbits.ACKSTAT;  // Check if ACK received
+    I2C2_Stop();
+    return connected;
+}
+
+//============================================================================
+// FPGA-Related Functions
+//============================================================================
 void sendFPGA_Command(const char* cmd, unsigned int value) {
-    I2C1_Start();
-    I2C1_Write(FPGA_ADDR << 1);  // FPGA address with write bit
-    I2C1_Write(cmd[0]);     // Command identifier
-    I2C1_Write((value >> 8) & 0xFF);  // High byte
-    I2C1_Write(value & 0xFF);         // Low byte
-    I2C1_Stop();
+    char fpga_cmd[32];
+    sprintf(fpga_cmd, "%s,%u\r\n", cmd, value);
+    UART2_WriteString(fpga_cmd);
 }
 
-unsigned int readFPGA_Value(const char* cmd) {
-    unsigned int value;
-    
-    I2C1_Start();
-    I2C1_Write(FPGA_ADDR << 1);       // FPGA address with write bit
-    I2C1_Write(cmd[0]);          // Command identifier for what we want to read
-    I2C1_Start();                // Repeated start
-    I2C1_Write((FPGA_ADDR << 1) | 1); // FPGA address with read bit
-    
-    value = I2C1_Read(1) << 8;   // Read high byte, send ACK
-    value |= I2C1_Read(0);       // Read low byte, send NACK
-    
-    I2C1_Stop();
-    return value;
+void sendFPGA_SimpleCommand(const char* cmd) {
+    UART2_WriteString(cmd);
+    UART2_WriteString("\r\n");
+}
+// If you need a function to read a single value from FPGA (optional example):
+// unsigned int readFPGA_Value(const char* cmd) {
+//     // Implementation if needed...
+//     return 0;
+// }
+
+//============================================================================
+// Non-Blocking FPGA Data Reading Function
+//============================================================================
+void readFPGAData(void) {
+    // Check if any data is available in UART2 buffer and forward it to UART1
+    while(UART2_DataReady()) {
+        char fpga_data = UART2_Read();
+        UART1_Write(fpga_data);
+    }
 }
 
-// Enhanced command processing
-// Global structure to store system status
-//typedef struct {
-//    int voltage;        // DAC voltage
-//    int courseGain;     // Course gain
-//    int fineGain;      // Fine gain
-//    int digitalGain;    // Digital gain
-//    int polarity;       // Input polarity
-//    int thresholdTime;  // Threshold time
-//    int riseTime;       // Rise time
-//    int flatTime;       // Flat time
-//    int poleZero;      // Pole-zero
-//    int digitalBL;      // Digital baseline
-//    int pileupReject;   // Pile-up reject
-//    int presetTime;     // Preset time
-//    int systemState;    // 0=stopped, 1=running
-//} SystemStatus;
-
-// Global status variable
-//SystemStatus status = {
-//    .voltage = 0,
-//    .courseGain = 0,
-//    .fineGain = 0,
-//    .digitalGain = 0,
-//    .polarity = 0,
-//    .thresholdTime = 0,
-//    .riseTime = 0,
-//    .flatTime = 0,
-//    .poleZero = 0,
-//    .digitalBL = 0,
-//    .pileupReject = 0,
-//    .presetTime = 0,
-//    .systemState = 0
-//};
-
-////Random data functions 
-//void generateSpectrumData(void) {
-//    for (int i = 0; i < CHANNELS; i++) {
-//        spectrumData[i] = rand() % 1000;  // Random values from 0 to 999
-//    }
-//}
-//
-//// Sends spectrum data through UART
-//void sendSpectrumData(void) {
-//    char buffer[8];  // Buffer to store string representation of values
-//    
-//    for (int i = 0; i < CHANNELS; i++) {
-//        sprintf(buffer, "%d", spectrumData[i]);
-//        UART1_WriteString(buffer);
-//        if (i < CHANNELS - 1) {
-//            UART1_Write(',');  // Separate values with a comma
-//        }
-//    }
-//    UART1_WriteString("\r\n");  // End of spectrum data line
-//}
-//
-//// Starts the periodic transmission of spectrum data
-//void startSpectrumTransmission(void) {
-//    isTransmitting = true;
-//    UART1_WriteString("Spectrum Data Transmission Started...\r\n");
-//
-//    while (isTransmitting) {
-//        generateSpectrumData();  // Generate new random spectrum data
-//        sendSpectrumData();       // Send data via UART
-//        delay_ms(2000);           // Wait for 1 second before sending next set
-//    }
-//}
-//
-//// Stops the transmission of spectrum data
-//void stopSpectrumTransmission(void) {
-//    isTransmitting = false;
-//    UART1_WriteString("Spectrum Data Transmission Stopped...\r\n");
-//}
-//
-//// Resets spectrum data to zero
-//void resetSpectrumData(void) {
-//    for (int i = 0; i < CHANNELS; i++) {
-//        spectrumData[i] = 0;
-//    }
-//    UART1_WriteString("Spectrum Data Reset...\r\n");
-//}
-
-void Timer2_Init(void) {
-    T2CON = 0x0;            // Stop the timer and clear configuration
-    T2CONbits.TCKPS = 7;    // 1:256 prescaler
-    PR2 = (SYSCLK / 256) - 1; // Set period for 1 second
-    TMR2 = 0;               // Reset timer counter
-    IFS0bits.T2IF = 0;      // Clear interrupt flag
-    IEC0bits.T2IE = 1;      // Enable Timer2 interrupt
-    IPC2bits.T2IP = 2;      // Set priority level
-    T2CONbits.ON = 1;       // Turn on Timer2
-}
-
-//void __ISR(_TIMER_2_VECTOR, IPL2SOFT) Timer2_ISR(void) {
-//    IFS0bits.T2IF = 0;  // Clear Timer2 interrupt flag
-//
-//    if (isTransmitting) {
-//        generateSpectrumData();  // Generate new random data
-//        sendSpectrumData();      // Send the spectrum data
-//    }
-//}
-
-
-//Random data functions stop
-
+//============================================================================
+// Command Processing
+//============================================================================
 void processCommand(const char* cmd) {
     char command[16];
     char param1[16];
     char param2[16];
     unsigned int value;
-//    char response[128];
     
     // Initialize parameters to empty strings
     command[0] = param1[0] = param2[0] = '\0';
@@ -442,32 +378,34 @@ void processCommand(const char* cmd) {
     
     // System Control Commands
     if(strcmp(command, "START") == 0) {
-//        startSpectrumTransmission();
-        I2C2_Start();
-        I2C1_Start();
         status.systemState = 1;
+        
+        // Enable continuous FPGA data reading
+        sendFPGA_SimpleCommand("start");
+        readFPGAData();
+        continuousFPGARead = true;
+        
         UART1_WriteString("System started\r\n");
         updateAndPrintStatus(UART1_WriteString, &status, "systemState", 1);
     }
     else if(strcmp(command, "STOP") == 0) {
-//        stopSpectrumTransmission();
-        I2C2_Stop();
-        I2C1_Stop();
         status.systemState = 0;
+        
+        // Disable continuous FPGA data reading
+        continuousFPGARead = false;
+        sendFPGA_SimpleCommand("stop");
+        
         UART1_WriteString("System stopped\r\n");
         updateAndPrintStatus(UART1_WriteString, &status, "systemState", 0);
     }
     else if(strcmp(command, "RESET") == 0) {
-//        resetSpectrumData();
         setDAC_Voltage(400);
         sendFPGA_Command("RST", 0);
-        // Don't clear status values
         UART1_WriteString("System reset complete\r\n");
         printStatusUpdate(UART1_WriteString, &status);
     }
     else if(strcmp(command, "STATUS") == 0) {
-    // Simply print current status
-    printStatusUpdate(UART1_WriteString, &status);
+        printStatusUpdate(UART1_WriteString, &status);
     }
     // DAC Commands
     else if(strcmp(command, "SETV") == 0) {
@@ -483,7 +421,6 @@ void processCommand(const char* cmd) {
         value = getDAC_Voltage();
         updateAndPrintStatus(UART1_WriteString, &status, "voltage", value);
     }
-    
     // FPGA - ADC Gain Commands
     else if(strcmp(command, "SETCG") == 0 || strcmp(command, "CG") == 0) {
         value = atoi(param2);
@@ -512,7 +449,6 @@ void processCommand(const char* cmd) {
             UART1_WriteString("Error: Digital gain must be between 0 and 255\r\n");
         }
     }
-    
     // FPGA - ADC Polarity Command
     else if(strcmp(command, "SETPOL") == 0 || strcmp(command, "POL") == 0) {
         value = atoi(param2);
@@ -523,7 +459,6 @@ void processCommand(const char* cmd) {
             UART1_WriteString("Error: Polarity must be 0 (negative) or 1 (positive)\r\n");
         }
     }
-    
     // FPGA - Timing Commands
     else if(strcmp(command, "SETTT") == 0 || strcmp(command, "TT") == 0) {
         value = atoi(param2);
@@ -552,7 +487,6 @@ void processCommand(const char* cmd) {
             UART1_WriteString("Error: Flat time must be between 0 and 10000 ns\r\n");
         }
     }
-    
     // FPGA - Signal Processing Commands
     else if(strcmp(command, "SETPZ") == 0 || strcmp(command, "PZ") == 0) {
         value = atoi(param2);
@@ -595,19 +529,22 @@ void processCommand(const char* cmd) {
     }
     else if(strcmp(command, "HELP") == 0) {
         UART1_WriteString("\r\nAvailable Commands:\r\n");
-        // ... (help text remains unchanged)
+        // (Your help text here)
     }
     else {
         UART1_WriteString("Unknown command. Type 'HELP' for available commands.\r\n");
     }
 }
 
+//============================================================================
+// Power-On Routine
+//============================================================================
 void performPOR(void) {
     // Initialize peripherals
     GPIO_Init();
     UART1_Init();
-//    I2C1_Init();  // Un-comment these
-//    I2C2_Init();  // Un-comment these
+    UART2_Init();
+    I2C2_Init();
     
     // Load saved status values first
     initStatus();
@@ -619,11 +556,10 @@ void performPOR(void) {
     
     // Check connections (just for info display)
     dacConnected = checkDAC_Connection();
-    fpgaConnected = checkFPGA_Connection();
     
     UART1_WriteString("\r\nInitializing System:\r\n");
     
-     // Always restore DAC voltage regardless of connection status
+    // Always restore DAC voltage regardless of connection status
     setDAC_Voltage(status.voltage);
     sprintf(debugStr, "Restored Voltage: %d V\r\n", status.voltage);
     UART1_WriteString(debugStr);
@@ -641,81 +577,17 @@ void performPOR(void) {
     sendFPGA_Command("PR", status.pileupReject);  
     sendFPGA_Command("PT", status.presetTime);    
     
-    // Restore system state
-    if(status.systemState == 1) {
-        I2C2_Start();
-        I2C1_Start();
-    }
-    
     // Just report connection status for information
     UART1_WriteString("DAC: ");
     UART1_WriteString(dacConnected ? "Connected\r\n" : "Not Connected\r\n");
-    UART1_WriteString("FPGA: ");
-    UART1_WriteString(fpgaConnected ? "Connected\r\n" : "Not Connected\r\n");
     
     UART1_WriteString("Power-On Reset complete\r\n");
     printStatusUpdate(UART1_WriteString, &status);
 }
 
-bool checkDAC_Connection(void) {
-    I2C2_Start();
-    I2C2_Write(DAC_ADDR << 1);    // Write address
-    bool connected = !I2C2STATbits.ACKSTAT;  // Check if ACK received
-    I2C2_Stop();
-    return connected;
-}
-
-bool checkFPGA_Connection(void) {
-    I2C1_Start();
-    I2C1_Write(FPGA_ADDR << 1);        // FPGA address
-    bool connected = !I2C1STATbits.ACKSTAT;  // Check if ACK received
-    I2C1_Stop();
-    return connected;
-}
-
-//int main(void) {
-//    SYSTEM_Init();
-//    GPIO_Init();
-//    UART1_Init();
-////    I2C1_Init();
-////    I2C2_Init();
-//    
-//    Timer2_Init();  // Initialize Timer2 for periodic interrupts
-//
-//    UART1_WriteString("\r\nPIC32 Control System Ready\r\n");
-//    
-//    INTCONSET = _INTCON_MVEC_MASK; // Enable multi-vector mode
-//    __builtin_enable_interrupts(); // Enable global interrupts
-//
-//
-//    while(1) {
-//        if (UART1_DataReady()) {
-//            char data = UART1_Read();
-//            UART1_Write(data); // Echo character
-//            
-//            if (data == '\r' || data == '\n') {
-//                if (cmdIndex > 0) {
-//                    cmdBuffer[cmdIndex] = '\0';
-//                    UART1_WriteString("\r\n");
-//                    processCommand(cmdBuffer);
-//                    cmdIndex = 0;
-//                }
-//            } 
-//            else if (data == '\b' || data == 0x7F) { // Backspace handling
-//                if (cmdIndex > 0) {
-//                    cmdIndex--;
-//                    UART1_WriteString("\b \b");
-//                }
-//            } 
-//            else if (cmdIndex < CMD_SIZE - 1) {
-//                cmdBuffer[cmdIndex++] = data;
-//            }
-//        }
-//    }
-//    return 0;
-//}
-
-
+//============================================================================
+// Main
+//============================================================================
 int main(void) {
     // System clock configuration first
     SYSTEM_Init();
@@ -723,16 +595,17 @@ int main(void) {
     // Then peripheral initialization
     GPIO_Init();
     UART1_Init();
-//    I2C1_Init();  // Un-comment these
-//    I2C2_Init();  // Un-comment these
+    UART2_Init();
+//    I2C2_Init();
     
     // Finally load status and restore settings
-//    initStatus();
+    initStatus();
     
     // Initial message
     UART1_WriteString("\r\nPIC32 Control System Ready\r\n");
     
     while(1) {
+        // Check for incoming UART1 data
         if(UART1_DataReady()) {
             char data = U1RXREG;
             
@@ -758,6 +631,14 @@ int main(void) {
                 cmdBuffer[cmdIndex++] = data;
             }
         }
+        
+        // Continuously read data from FPGA if enabled (non-blocking)
+        if(continuousFPGARead == true) {
+            readFPGAData();
+        }
+        
+        // Add any other periodic or background tasks here if needed
     }
+    
     return 0;
 }

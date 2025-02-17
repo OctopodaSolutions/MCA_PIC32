@@ -1,3 +1,4 @@
+// Configuration bits
 #pragma config FNOSC = FRCPLL    // Internal Fast RC oscillator with PLL
 #pragma config FSOSCEN = OFF     // Secondary Oscillator Disable
 #pragma config POSCMOD = OFF     // Primary oscillator disabled
@@ -18,189 +19,205 @@
 #include <sys/attribs.h>
 #include <stdbool.h>
 
+
+// Constants
 #define SYSCLK  60000000L
 #define PBCLK   60000000L
+#define I2C_CLOCK_FREQ 100000    // 100kHz I2C clock
 #define UART_BAUD 115200
-#define I2C_CLOCK_FREQ 100000
 
-volatile char rxData;
-volatile bool dataReceived = false;
+// Function prototypes
+void SYSTEM_Init(void);
+void UART_Init(void);
+void I2C_Init(void);
+void I2C_ScanBus(void);
+void UART_WriteString(const char* str);
+void UART_WriteHex(unsigned char value);
 
-void SYSTEM_Init(void) {
-    __builtin_disable_interrupts();
-    
-    SYSKEY = 0;
-    SYSKEY = 0xAA996655;
-    SYSKEY = 0x556699AA;
-    
-    OSCCONbits.NOSC = 0x0001;
-    OSCCONbits.FRCDIV = 0;
-    OSCCONbits.PBDIV = 0;
-    
-    while(OSCCONbits.OSWEN != 0);
-    while(OSCCONbits.SLOCK != 1);
-    
-    SYSKEY = 0x33333333;
-    
-    __builtin_enable_interrupts();
-}
-
-void GPIO_Init(void) {
-    ANSELA = 0x0000;
-    ANSELB = 0x0000;
-    
-    TRISAbits.TRISA4 = 1;
-    TRISAbits.TRISA0 = 0;
-    
-    RPA0Rbits.RPA0R = 0b0001;
-    RPA4R = 0b0010;
-}
-
-void UART1_Init(void) {
-    U1MODEbits.ON = 0;
-    U1BRG = ((PBCLK / (16 * UART_BAUD)) - 1);
-    
-    U1MODE = 0x0000;
-    U1MODEbits.BRGH = 0;
-    U1MODEbits.PDSEL = 0;
-    U1MODEbits.STSEL = 0;
-    
-    U1STAbits.URXEN = 1;
-    U1STAbits.UTXEN = 1;
-    
-    IPC8bits.U1IP = 2;
-    IPC8bits.U1IS = 0;
-    IFS1bits.U1RXIF = 0;
-    IEC1bits.U1RXIE = 1;
-    
-    U1MODEbits.ON = 1;
-    
-    delay_ms(1);
-}
-
-void I2C1_Init(void) {
-    I2C1CONbits.ON = 0;
-    I2C1BRG = (PBCLK / (2 * I2C_CLOCK_FREQ)) - 2;
-    
-    I2C1CONbits.SIDL = 0;
-    I2C1CONbits.DISSLW = 1;
-    I2C1CONbits.ACKDT = 0;
-    
-    TRISBbits.TRISB8 = 1;
-    TRISBbits.TRISB9 = 1;
-    
-    I2C1CONbits.ON = 1;
-}
-
-void UART1_Write(unsigned char data) {
-    while(U1STAbits.UTXBF);
-    U1TXREG = data;
-}
-
-void UART1_WriteString(const char* str) {
-    while(*str != '\0') {
-        UART1_Write(*str++);
-    }
-}
-
+// Simple delay function
 void delay_ms(unsigned int ms) {
-    unsigned int ticks = ms * 60000;
-    for(unsigned int i = 0; i < ticks; i++) {
+    unsigned int i;
+    for(i = 0; i < (ms * (SYSCLK/2000)); i++) {
         asm("nop");
     }
 }
 
-bool I2C1_Start(void) {
+// Initialize system clock and peripherals
+void SYSTEM_Init(void) {
+    // Disable interrupts
+    __builtin_disable_interrupts();
+    
+    // Unlock system
+    SYSKEY = 0;
+    SYSKEY = 0xAA996655;
+    SYSKEY = 0x556699AA;
+    
+    // Configure oscillator
+    OSCCONbits.NOSC = 0x0001;    // FRCPLL
+    OSCCONbits.FRCDIV = 0;       // FRC divider = 1
+    OSCCONbits.PBDIV = 0;        // Peripheral bus clock = SYSCLK
+    
+    // Wait for clock switch and PLL lock
+    while(OSCCONbits.OSWEN != 0);
+    while(OSCCONbits.SLOCK != 1);
+    
+    // Lock system
+    SYSKEY = 0x33333333;
+    
+    // Enable interrupts
+    __builtin_enable_interrupts();
+}
+
+// Initialize UART for debug output
+void UART_Init(void) {
+    // Configure UART pins
+    ANSELA &= ~(1 << 0);    // Set RA0 as digital (TX)
+    ANSELA &= ~(1 << 4);    // Set RA4 as digital (RX)
+    TRISAbits.TRISA0 = 0;   // TX as output
+    TRISAbits.TRISA4 = 1;   // RX as input
+    
+    // Unlock PPS
+    SYSKEY = 0;
+    SYSKEY = 0xAA996655;
+    SYSKEY = 0x556699AA;
+    
+    U1RXR = 0b0010;         // Map U1RX to RA4
+    RPA0R = 0b0001;         // Map U1TX to RA0
+    
+    SYSKEY = 0x33333333;    // Lock PPS
+    
+    // Configure UART
+    U1MODEbits.ON = 0;      // Disable UART
+    U1MODE = 0;             // Clear mode register
+    U1STA = 0;              // Clear status register
+    U1BRG = ((PBCLK / (16 * UART_BAUD)) - 1);
+    
+    U1MODEbits.BRGH = 0;    // Standard Speed mode
+    U1MODEbits.PDSEL = 0;   // 8-bit data, no parity
+    U1MODEbits.STSEL = 0;   // 1 stop bit
+    
+    U1STAbits.UTXEN = 1;    // Enable transmit
+    U1STAbits.URXEN = 1;    // Enable receive
+    U1MODEbits.ON = 1;      // Enable UART
+    
+    delay_ms(1);
+}
+
+// Initialize I2C
+void I2C_Init(void) {
+    // Disable I2C before configuration
+    I2C1CONbits.ON = 0;
+    
+    // Configure I2C pins
+//    ANSELBbits.ANSB8 = 0;   // Set RB8 as digital (SCL)
+//    ANSELBbits.ANSB9 = 0;   // Set RB9 as digital (SDA)
+//    TRISBbits.TRISB8 = 1;   // SCL as input
+//    TRISBbits.TRISB9 = 1;   // SDA as input
+    TRISBbits.TRISB3 = 0;    // SCL2
+    TRISBbits.TRISB2 = 0;    // SDA2
+    
+    // Set I2C baud rate
+    I2C1BRG = (PBCLK / (2 * I2C_CLOCK_FREQ)) - 2;
+    
+    // Configure I2C
+    I2C1CONbits.SIDL = 0;    // Continue in idle mode
+    I2C1CONbits.DISSLW = 1;  // Disable slew rate control
+    I2C1CONbits.ACKDT = 0;   // Send ACK during acknowledge
+    
+    // Enable I2C
+    I2C1CONbits.ON = 1;
+}
+
+// Send I2C start condition
+bool I2C_Start(void) {
+    // Check if I2C is idle
     if(I2C1CONbits.SEN || I2C1CONbits.PEN || I2C1CONbits.RSEN || 
        I2C1CONbits.RCEN || I2C1CONbits.ACKEN) {
         return false;
     }
     
-    I2C1CONbits.SEN = 1;
-    while(I2C1CONbits.SEN);
+    I2C1CONbits.SEN = 1;            // Send start condition
+    while(I2C1CONbits.SEN == 1);    // Wait for start to complete
     return true;
 }
 
-void I2C1_Stop(void) {
-    I2C1CONbits.PEN = 1;
-    while(I2C1CONbits.PEN);
+// Send I2C stop condition
+void I2C_Stop(void) {
+    I2C1CONbits.PEN = 1;            // Send stop condition
+    while(I2C1CONbits.PEN == 1);    // Wait for stop to complete
 }
 
-bool I2C1_WriteAddress(unsigned char address) {
-    I2C1TRN = address;
-    while(I2C1STATbits.TRSTAT);
-    return !I2C1STATbits.ACKSTAT;
+// Write byte to I2C bus
+bool I2C_WriteByte(unsigned char data) {
+    I2C1TRN = data;                     // Load data into transmit register
+    while(I2C1STATbits.TRSTAT == 1);    // Wait for transmission
+    return (I2C1STATbits.ACKSTAT == 0); // Return ACK status
 }
 
-void PrintHex(unsigned char value) {
+// Scan I2C bus for devices
+void I2C_ScanBus(void) {
+    bool deviceFound = false;
+    unsigned char address;
+    
+    UART_WriteString("Starting I2C bus scan...\r\n");
+    
+    // Scan all possible 7-bit addresses (0x08-0x77)
+    for(address = 0x08; address < 0x78; address++) {
+        if(I2C_Start()) {
+            if(I2C_WriteByte((address << 1) | 0)) {
+                UART_WriteString("Device found at address: ");
+                UART_WriteHex(address);
+                UART_WriteString("\r\n");
+                deviceFound = true;
+            }
+            I2C_Stop();
+        }
+        delay_ms(5);  // Small delay between scans
+    }
+    
+    if(!deviceFound) {
+        UART_WriteString("No I2C devices found\r\n");
+    }
+    
+    UART_WriteString("Scan complete\r\n\n");
+}
+
+// Write string to UART
+void UART_WriteString(const char* str) {
+    while(*str != '\0') {
+        while(U1STAbits.UTXBF == 1);  // Wait if buffer is full
+        U1TXREG = *str++;             // Send character
+    }
+}
+
+// Write hex value to UART
+void UART_WriteHex(unsigned char value) {
     char hexChars[] = "0123456789ABCDEF";
-    char hexStr[6];
+    char hexStr[5];
     
     hexStr[0] = '0';
     hexStr[1] = 'x';
     hexStr[2] = hexChars[(value >> 4) & 0x0F];
     hexStr[3] = hexChars[value & 0x0F];
-    hexStr[4] = '\r';
-    hexStr[5] = '\n';
+    hexStr[4] = '\0';
     
-    for(int i = 0; i < 6; i++) {
-        UART1_Write(hexStr[i]);
-    }
-}
-
-void I2C1_ScanBus(void) {
-    bool deviceFound = false;
-    
-    UART1_WriteString("Starting I2C scan...\r\n");
-    
-    for(unsigned char address = 0x08; address < 0x78; address++) {
-        if(!I2C1_Start()) {
-            UART1_WriteString("Start condition failed\r\n");
-            continue;
-        }
-        
-        if(I2C1_WriteAddress((address << 1) | 0)) {
-            UART1_WriteString("Device found at address: ");
-            PrintHex(address);
-            deviceFound = true;
-        }
-        
-        I2C1_Stop();
-        delay_ms(5);
-    }
-    
-    if(!deviceFound) {
-        UART1_WriteString("No I2C devices found\r\n");
-    }
-    UART1_WriteString("Scan complete\r\n\n");
-}
-
-void __ISR(_UART_1_VECTOR, IPL2AUTO) UART1_RX_Handler(void) {
-    if(U1STAbits.URXDA) {
-        rxData = U1RXREG;
-        dataReceived = true;
-    }
-    IFS1bits.U1RXIF = 0;
+    UART_WriteString(hexStr);
 }
 
 int main(void) {
+    // Initialize system
     SYSTEM_Init();
-    GPIO_Init();
-    UART1_Init();
-    I2C1_Init();
+    UART_Init();
+    I2C_Init();
     
-    delay_ms(500);
-    UART1_WriteString("PIC32 I2C Scanner Ready\r\n");
-    UART1_WriteString("Send 's' to start scan\r\n");
+    delay_ms(500);  // Startup delay
+    
+    UART_WriteString("PIC32MX I2C Scanner\r\n");
+    UART_WriteString("================\r\n\n");
     
     while(1) {
-        if(dataReceived) {
-            if(rxData == 's' || rxData == 'S') {
-                I2C1_ScanBus();
-            }
-            dataReceived = false;
-        }
-        delay_ms(1000);
+        I2C_ScanBus();       // Scan for I2C devices
+        delay_ms(2000);      // Wait 2 seconds between scans
     }
     
     return 0;
