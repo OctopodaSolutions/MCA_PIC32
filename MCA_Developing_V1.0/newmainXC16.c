@@ -50,6 +50,9 @@ bool dacConnected = false;
 // NEW FLAG: Control continuous FPGA data reading
 bool continuousFPGARead = false;
 
+// Chip Select for PGA112AIDGST via SPI 
+#define PGA_CS          LATCbits.LATC2
+
 //============================================================================
 // Function Prototypes
 //============================================================================
@@ -76,8 +79,13 @@ void UART2_WriteString(const char* str);
 unsigned char UART2_DataReady(void);
 char UART2_Read(void);
 
-// NEW FUNCTION: Non-blocking read from FPGA
-void readFPGAData(void);
+// SPI Functions for PGA112AIDGST
+void SPI_Init(void);
+unsigned char SPI_Transfer(unsigned char data);
+void SPI_Write(unsigned char data);
+unsigned char SPI_Read(void);
+void PGA112_Write(unsigned char reg, unsigned char value);
+unsigned char PGA112_Read(unsigned char reg);
 
 //============================================================================
 // Utility Functions
@@ -135,6 +143,8 @@ void GPIO_Init(void) {
     U2RXR = 0b0100;          // RB8 -> U2RX
     RPB9R = 0b0010;          // RB9 -> U2TX
     
+   // SPI Pins not included here need to add after the pin confirmation
+   
     // Lock PPS
     SYSKEY = 0x33333333;
 }
@@ -284,7 +294,6 @@ unsigned char I2C2_Read(unsigned char ack) {
 //============================================================================
 void setDAC_Voltage(unsigned int voltage) {
     if(voltage > 1000) voltage = 1000;  // Clamp to max value
-    // "if(voltage < 0)" not needed for unsigned int, but let's keep logic
     if(voltage < 0) voltage = 0;        // Clamp to min value
     
     unsigned int dac_value = (voltage * 65535UL) / 1000; // Convert voltage to DAC value
@@ -337,21 +346,64 @@ void sendFPGA_SimpleCommand(const char* cmd) {
     UART2_WriteString(cmd);
     UART2_WriteString("\r\n");
 }
-// If you need a function to read a single value from FPGA (optional example):
+// function to read a single value from FPGA 
 // unsigned int readFPGA_Value(const char* cmd) {
 //     // Implementation if needed...
 //     return 0;
 // }
 
-//============================================================================
-// Non-Blocking FPGA Data Reading Function
-//============================================================================
 void readFPGAData(void) {
     // Check if any data is available in UART2 buffer and forward it to UART1
     while(UART2_DataReady()) {
         char fpga_data = UART2_Read();
         UART1_Write(fpga_data);
     }
+}
+
+//============================================================================
+// SPI Functions for PGA112AIDGST
+//============================================================================
+void SPI_Init(void) {
+    // Configure SPI1 for Master mode, mode 0 (CKP=0, CKE=1)
+    SPI1CON = 0;              // Reset configuration
+    SPI1STATCLR = 0x40;       // Clear overflow flag
+    SPI1CONbits.MSTEN = 1;    // Enable Master mode
+    SPI1CONbits.CKP = 0;      // Clock idle low
+    SPI1CONbits.CKE = 1;      // Data is shifted out on the rising edge
+    SPI1CONbits.SMP = 0;      // Input sampled at middle of data output time
+    SPI1BRG = 1;              // Set baud rate (adjust as needed)
+    SPI1CONbits.ON = 1;       // Enable SPI module
+}
+
+unsigned char SPI_Transfer(unsigned char data) {
+    SPI1BUF = data;
+    while(!SPI1STATbits.SPIRBF);  // Wait until transfer complete
+    return SPI1BUF;
+}
+
+void SPI_Write(unsigned char data) {
+    SPI_Transfer(data);
+}
+
+unsigned char SPI_Read(void) {
+    return SPI_Transfer(0xFF);  // Send dummy byte and return received data
+}
+
+void PGA112_Write(unsigned char reg, unsigned char value) {
+    // Pull CS low to start communication
+    PGA_CS = 0;
+    SPI_Write(reg);
+    SPI_Write(value);
+    PGA_CS = 1; // Pull CS high to end communication
+}
+
+unsigned char PGA112_Read(unsigned char reg) {
+    unsigned char value;
+    PGA_CS = 0;
+    SPI_Write(reg);  // Send register address (protocol-dependent)
+    value = SPI_Read();
+    PGA_CS = 1;
+    return value;
 }
 
 //============================================================================
@@ -530,9 +582,181 @@ void processCommand(const char* cmd) {
     else if(strcmp(command, "HELP") == 0) {
         UART1_WriteString("\r\nAvailable Commands:\r\n");
         // (Your help text here)
+    } else if(strcmp(command, "SETC") == 0 || strcmp(command, "COUNT") == 0) {
+        value = atoi(param2);
+        // Optionally add bounds checking if needed
+        sendFPGA_Command("COUNT", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "count", value);
+    }
+    // SETSCH,SCH,value set start channel
+    else if(strcmp(command, "SETSCH") == 0 || strcmp(command, "SCH") == 0) {
+        value = atoi(param2);
+        sendFPGA_Command("SCH", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "startChannel", value);
+    }
+    // SETECH,ECH,Value set end channel
+    else if(strcmp(command, "SETECH") == 0 || strcmp(command, "ECH") == 0) {
+        value = atoi(param2);
+        sendFPGA_Command("ECH", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "endChannel", value);
+    }
+    // SETCH,CH,Value  set number of channels (e.g., 1024, 2048, 4096, etc.)
+    else if(strcmp(command, "SETCH") == 0 || strcmp(command, "CH") == 0) {
+        value = atoi(param2);
+        // You might want to restrict this to allowed values (1024, 2048, 4096, etc.)
+        sendFPGA_Command("CH", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "channels", value);
+    }
+    // SETLLD,LLD,Value    set LLD value
+    else if(strcmp(command, "SETLLD") == 0 || strcmp(command, "LLD") == 0) {
+        value = atoi(param2);
+        sendFPGA_Command("LLD", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "LLD", value);
+    } else if(strcmp(command, "SETDT") == 0 || strcmp(command, "DT") == 0) {
+        value = atoi(param2);
+        // Optionally, you can add bounds checking for dwell time here.
+        sendFPGA_Command("DT", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "dwellTime", value);
+    }
+    // SETULD,ULD,Value     set ULD value
+    else if(strcmp(command, "SETULD") == 0 || strcmp(command, "ULD") == 0) {
+        value = atoi(param2);
+        sendFPGA_Command("ULD", value);
+        updateAndPrintStatus(UART1_WriteString, &status, "ULD", value);
+    }
+    // SETHVON,ON,value   1 is HV on, 0 is HV off
+    else if(strcmp(command, "SETHVON") == 0 || strcmp(command, "ON") == 0) {
+        value = atoi(param2);
+        if(value == 0 || value == 1) {
+            sendFPGA_Command("ON", value);
+            updateAndPrintStatus(UART1_WriteString, &status, "hvStatus", value);
+        } else {
+            UART1_WriteString("Error: HV status must be 0 (off) or 1 (on)\r\n");
+        }
+    }
+}
+
+void processModeCommand(const char *cmd) {
+    char cmdCopy[CMD_SIZE];
+    // Copy the input command into a modifiable buffer
+    strncpy(cmdCopy, cmd, CMD_SIZE);
+    cmdCopy[CMD_SIZE - 1] = '\0';  // Ensure null termination
+
+    // Tokenize the command string using commas as delimiters.
+    // Reserve up to 21 tokens (mode plus maximum parameters).
+    char *tokens[21];
+    int tokenCount = 0;
+    char *token = strtok(cmdCopy, ",");
+    while (token != NULL && tokenCount < 21) {
+        tokens[tokenCount++] = token;
+        token = strtok(NULL, ",");
+    }
+
+    if(tokenCount < 1) {
+        UART1_WriteString("Error: No mode specified.\r\n");
+        return;
+    }
+
+    // Check for mode selection (PHA or MCS)
+    if(strcmp(tokens[0], "PHA") == 0) {
+        // Expected 18 parameters after "PHA" (total tokens = 19)
+        if(tokenCount != 19) {
+            UART1_WriteString("Error: Incorrect number of parameters for PHA mode.\r\n");
+            return;
+        }
+        int presetTime    = atoi(tokens[1]);
+        int counts        = atoi(tokens[2]);
+        int startChannel  = atoi(tokens[3]);
+        int endChannel    = atoi(tokens[4]);
+        int noOfChannels  = atoi(tokens[5]);
+        int LLD           = atoi(tokens[6]);
+        int ULD           = atoi(tokens[7]);
+        int coarseGain    = atoi(tokens[8]);
+        int fineGain      = atoi(tokens[9]);
+        int inputPolarity = atoi(tokens[10]);
+        int threshold     = atoi(tokens[11]);
+        int riseTime      = atoi(tokens[12]);
+        int flatTime      = atoi(tokens[13]);
+        int poleZeros     = atoi(tokens[14]);
+        int digitalBLR    = atoi(tokens[15]);
+        int pileupReject  = atoi(tokens[16]);
+        int HV            = atoi(tokens[17]);
+        int HV_on_off     = atoi(tokens[18]);
+
+        // Update system status with parsed values
+        updateAndPrintStatus(UART1_WriteString, &status, "presetTime", presetTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "counts", counts);
+        updateAndPrintStatus(UART1_WriteString, &status, "startChannel", startChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "endChannel", endChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "noOfChannels", noOfChannels);
+        updateAndPrintStatus(UART1_WriteString, &status, "LLD", LLD);
+        updateAndPrintStatus(UART1_WriteString, &status, "ULD", ULD);
+        updateAndPrintStatus(UART1_WriteString, &status, "coarseGain", coarseGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "fineGain", fineGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "inputPolarity", inputPolarity);
+        updateAndPrintStatus(UART1_WriteString, &status, "threshold", threshold);
+        updateAndPrintStatus(UART1_WriteString, &status, "riseTime", riseTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "flatTime", flatTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "poleZeros", poleZeros);
+        updateAndPrintStatus(UART1_WriteString, &status, "digitalBLR", digitalBLR);
+        updateAndPrintStatus(UART1_WriteString, &status, "pileupReject", pileupReject);
+        updateAndPrintStatus(UART1_WriteString, &status, "HV", HV);
+        updateAndPrintStatus(UART1_WriteString, &status, "HV_on_off", HV_on_off);
+
+        UART1_WriteString("PHA mode configuration accepted.\r\n");
+    }
+    else if(strcmp(tokens[0], "MCS") == 0) {
+        // Expected 19 parameters after "MCS" (total tokens = 20)
+        if(tokenCount != 20) {
+            UART1_WriteString("Error: Incorrect number of parameters for MCS mode.\r\n");
+            return;
+        }
+        int presetTime    = atoi(tokens[1]);
+        int counts        = atoi(tokens[2]);
+        int startChannel  = atoi(tokens[3]);
+        int endChannel    = atoi(tokens[4]);
+        int noOfChannels  = atoi(tokens[5]);
+        int LLD           = atoi(tokens[6]);
+        int ULD           = atoi(tokens[7]);
+        int coarseGain    = atoi(tokens[8]);
+        int fineGain      = atoi(tokens[9]);
+        int inputPolarity = atoi(tokens[10]);
+        int threshold     = atoi(tokens[11]);
+        int riseTime      = atoi(tokens[12]);
+        int flatTime      = atoi(tokens[13]);
+        int poleZeros     = atoi(tokens[14]);
+        int digitalBLR    = atoi(tokens[15]);
+        int pileupReject  = atoi(tokens[16]);
+        int HV            = atoi(tokens[17]);
+        int HV_on_off     = atoi(tokens[18]);
+        int dwellTime     = atoi(tokens[19]);
+
+        // Update system status with parsed values
+        updateAndPrintStatus(UART1_WriteString, &status, "presetTime", presetTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "counts", counts);
+        updateAndPrintStatus(UART1_WriteString, &status, "startChannel", startChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "endChannel", endChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "noOfChannels", noOfChannels);
+        updateAndPrintStatus(UART1_WriteString, &status, "LLD", LLD);
+        updateAndPrintStatus(UART1_WriteString, &status, "ULD", ULD);
+        updateAndPrintStatus(UART1_WriteString, &status, "coarseGain", coarseGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "fineGain", fineGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "inputPolarity", inputPolarity);
+        updateAndPrintStatus(UART1_WriteString, &status, "threshold", threshold);
+        updateAndPrintStatus(UART1_WriteString, &status, "riseTime", riseTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "flatTime", flatTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "poleZeros", poleZeros);
+        updateAndPrintStatus(UART1_WriteString, &status, "digitalBLR", digitalBLR);
+        updateAndPrintStatus(UART1_WriteString, &status, "pileupReject", pileupReject);
+        updateAndPrintStatus(UART1_WriteString, &status, "HV", HV);
+        updateAndPrintStatus(UART1_WriteString, &status, "HV_on_off", HV_on_off);
+        updateAndPrintStatus(UART1_WriteString, &status, "dwellTime", dwellTime);
+
+        // Optionally, send corresponding FPGA/DAC commands here.
+        UART1_WriteString("MCS mode configuration accepted.\r\n");
     }
     else {
-        UART1_WriteString("Unknown command. Type 'HELP' for available commands.\r\n");
+        UART1_WriteString("Error: Invalid mode specified. Use 'PHA' or 'MCS'.\r\n");
     }
 }
 
@@ -544,7 +768,8 @@ void performPOR(void) {
     GPIO_Init();
     UART1_Init();
     UART2_Init();
-    I2C2_Init();
+//    I2C2_Init();
+    // SPI_Init();
     
     // Load saved status values first
     initStatus();
@@ -589,39 +814,44 @@ void performPOR(void) {
 // Main
 //============================================================================
 int main(void) {
-    // System clock configuration first
     SYSTEM_Init();
-    
-    // Then peripheral initialization
     GPIO_Init();
     UART1_Init();
     UART2_Init();
-//    I2C2_Init();
+    // I2C2_Init();  
+    // SPI_Init();
     
-    // Finally load status and restore settings
+    // Restore system status
     initStatus();
     
     // Initial message
     UART1_WriteString("\r\nPIC32 Control System Ready\r\n");
     
     while(1) {
-        // Check for incoming UART1 data
+        // Check for incoming UART1 data character-by-character
         if(UART1_DataReady()) {
             char data = U1RXREG;
             
-            // Echo received character
+            // Echo received character back
             UART1_Write(data);
             
-            // Process the received character
+            // If newline or carriage return, process the command buffer
             if(data == '\r' || data == '\n') {
                 if(cmdIndex > 0) {
                     cmdBuffer[cmdIndex] = '\0';
                     UART1_WriteString("\r\n");
-                    processCommand(cmdBuffer);
-                    cmdIndex = 0;
+                    
+                    // Check if the command starts with "PHA" or "MCS" for full configuration
+                    if(strncmp(cmdBuffer, "PHA", 3) == 0 || strncmp(cmdBuffer, "MCS", 3) == 0) {
+                        processModeCommand(cmdBuffer);
+                    } else {
+                        processCommand(cmdBuffer);
+                    }
+                    
+                    cmdIndex = 0;  // Reset the command buffer index
                 }
             }
-            else if(data == '\b' || data == 0x7F) {  // Backspace or Delete
+            else if(data == '\b' || data == 0x7F) {  // Handle backspace or delete
                 if(cmdIndex > 0) {
                     cmdIndex--;
                     UART1_WriteString("\b \b");
@@ -632,12 +862,11 @@ int main(void) {
             }
         }
         
-        // Continuously read data from FPGA if enabled (non-blocking)
+        // Non-blocking FPGA data read if enabled
         if(continuousFPGARead == true) {
             readFPGAData();
         }
         
-        // Add any other periodic or background tasks here if needed
     }
     
     return 0;

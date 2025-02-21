@@ -24,7 +24,7 @@ CLEAN_SUBPROJECTS=${CLEAN_SUBPROJECTS_${SUBPROJECTS}}
 
 
 # Project Name
-PROJECTNAME=uart_fpga.X
+PROJECTNAME=MCA_Developing_V1.0
 
 # Active Configuration
 DEFAULTCONF=default

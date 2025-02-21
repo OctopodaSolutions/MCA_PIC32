@@ -6,5 +6,5 @@
 CND_BASEDIR=`pwd`
 # default configuration
 CND_ARTIFACT_DIR_default=dist/default/production
-CND_ARTIFACT_NAME_default=uart_fpga.X.production.hex
-CND_ARTIFACT_PATH_default=dist/default/production/uart_fpga.X.production.hex
+CND_ARTIFACT_NAME_default=MCA_Developing_V1.0.production.hex
+CND_ARTIFACT_PATH_default=dist/default/production/MCA_Developing_V1.0.production.hex
