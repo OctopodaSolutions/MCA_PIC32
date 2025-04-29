@@ -30,24 +30,34 @@ static void unlockFlash(void) {
     NVMKEY = 0x556699AA;
 }
 
-// Function to get status string
+// Function to get status string as comma-separated values with redundant parameters removed
 const char* getStatusString(const SystemStatus* status)
 {
-    static char buffer[256];
-    sprintf(buffer, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\r\n",
-            status->systemState,
-            status->voltage,
+    static char buffer[512]; // Buffer for the status string
+    sprintf(buffer, 
+            "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+            // Parameters in token processing order, 
+            status->mode,
+            status->presetTime,
+            status->counts,            
+            status->startChannel,
+            status->endChannel,
+            status->noOfChannels,
+            status->LLD,
+            status->ULD,
             status->courseGain,
             status->fineGain,
-            status->digitalGain,
-            status->polarity,
-            status->thresholdTime,
+            status->inputPolarity,
+            status->threshold,
             status->riseTime,
             status->flatTime,
             status->poleZero,
-            status->digitalBL,
+            status->digitalBLR,
             status->pileupReject,
-            status->presetTime);
+            status->voltage,
+            status->hvStatus,
+            status->dwellTime);
+            
     return buffer;
 }
 
@@ -89,6 +99,29 @@ void initStatus(void) {
         // Initialize with defaults and save
         memset(&status, 0, sizeof(SystemStatus));
         status.validKey = FLASH_VALID_KEY;
+        
+        // Set default values in token processing order
+        status.presetTime = 300;     // Default preset time (5 minutes)
+        status.counts = 0;           // Default counts (total accumulated counts)
+        status.noOfChannels = 1024;  // Default number of channels (spectrum size)
+        status.startChannel = 0;     // Default start channel
+        status.endChannel = 1023;    // Default end channel
+        status.LLD = 10;             // Default LLD
+        status.ULD = 1000;           // Default ULD
+        status.courseGain = 32;      // Mid-range course gain
+        status.fineGain = 128;       // Mid-range fine gain
+        status.inputPolarity = 1;    // Default positive polarity
+        status.threshold = 50;       // Default threshold
+        status.riseTime = 1000;      // Default rise time
+        status.flatTime = 1000;      // Default flat time
+        status.poleZero = 500;       // Default pole-zero
+        status.digitalBLR = 500;     // Default digital baseline restore
+        status.pileupReject = 50;    // Default pile-up reject
+        status.voltage = 1000;       // Default voltage/HV
+        status.hvStatus = 0;         // HV off by default
+        status.dwellTime = 100;      // Default dwell time for MCS mode
+        status.mode = 0;             // PHA mode by default
+        
         saveStatusToFlash();
         extern void UART1_WriteString(const char*);
         UART1_WriteString("Initialized new status\r\n");
@@ -106,7 +139,7 @@ void saveStatusToFlash(void) {
     
     extern void UART1_WriteString(const char*);
     if(success) {
-        UART1_WriteString("Status saved to flash\r\n"); 
+//        UART1_WriteString("Status saved to flash\r\n"); 
     } else {
         UART1_WriteString("Error saving to flash\r\n");
     }
@@ -120,18 +153,59 @@ void printStatusUpdate(WriteStringFn writeString, const SystemStatus* status)
     }
 }
 
+// Updated updateAndPrintStatus function with optional printing control
+// Parameters are now in the same order as getStatusString
 void updateAndPrintStatus(WriteStringFn writeString, SystemStatus* status, const char* parameter, int value)
 {
     bool updated = false;
+    bool printAfterUpdate = true; // By default, print status after update
     
-    if(strcmp(parameter, "systemState") == 0)
+    // Check if this is a special case where we don't want to print
+    if (parameter != NULL && parameter[0] == '!') {
+        // If parameter starts with '!', it means don't print after update
+        parameter++; // Skip the '!' character
+        printAfterUpdate = false;
+    }
+    
+    // Handle parameters in the same order as getStatusString
+    if(strcmp(parameter, "mode") == 0)
     {
-        status->systemState = value;
+        status->mode = value;
         updated = true;
     }
-    else if(strcmp(parameter, "voltage") == 0)
+    else if(strcmp(parameter, "presetTime") == 0)
     {
-        status->voltage = value;
+        status->presetTime = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "counts") == 0)
+    {
+        status->counts = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "startChannel") == 0)
+    {
+        status->startChannel = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "endChannel") == 0)
+    {
+        status->endChannel = value;
+        updated = true;
+    }
+        else if(strcmp(parameter, "noOfChannels") == 0)
+    {
+        status->noOfChannels = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "LLD") == 0)
+    {
+        status->LLD = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "ULD") == 0)
+    {
+        status->ULD = value;
         updated = true;
     }
     else if(strcmp(parameter, "courseGain") == 0)
@@ -144,19 +218,16 @@ void updateAndPrintStatus(WriteStringFn writeString, SystemStatus* status, const
         status->fineGain = value;
         updated = true;
     }
-    else if(strcmp(parameter, "digitalGain") == 0)
+    else if(strcmp(parameter, "inputPolarity") == 0 || strcmp(parameter, "polarity") == 0)
     {
-        status->digitalGain = value;
+        // Handle both parameter names, but store in inputPolarity
+        status->inputPolarity = value;
         updated = true;
     }
-    else if(strcmp(parameter, "polarity") == 0)
+    else if(strcmp(parameter, "threshold") == 0 || strcmp(parameter, "thresholdTime") == 0)
     {
-        status->polarity = value;
-        updated = true;
-    }
-    else if(strcmp(parameter, "thresholdTime") == 0)
-    {
-        status->thresholdTime = value;
+        // Handle both parameter names, but store in threshold
+        status->threshold = value;
         updated = true;
     }
     else if(strcmp(parameter, "riseTime") == 0)
@@ -174,9 +245,10 @@ void updateAndPrintStatus(WriteStringFn writeString, SystemStatus* status, const
         status->poleZero = value;
         updated = true;
     }
-    else if(strcmp(parameter, "digitalBL") == 0)
+    else if(strcmp(parameter, "digitalBLR") == 0 || strcmp(parameter, "digitalBL") == 0)
     {
-        status->digitalBL = value;
+        // Handle both parameter names, but store in digitalBLR
+        status->digitalBLR = value;
         updated = true;
     }
     else if(strcmp(parameter, "pileupReject") == 0)
@@ -184,20 +256,31 @@ void updateAndPrintStatus(WriteStringFn writeString, SystemStatus* status, const
         status->pileupReject = value;
         updated = true;
     }
-    else if(strcmp(parameter, "presetTime") == 0)
+    else if(strcmp(parameter, "voltage") == 0 || strcmp(parameter, "HV") == 0)
     {
-        status->presetTime = value;
+        status->voltage = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "hvStatus") == 0 || strcmp(parameter, "HV_on_off") == 0)
+    {
+        status->hvStatus = value;
+        updated = true;
+    }
+    else if(strcmp(parameter, "dwellTime") == 0)
+    {
+        status->dwellTime = value;
         updated = true;
     }
     
     // Save to flash only if a value was updated
     if(updated)
     {
-        saveStatusToFlash();
+        extern void saveStatus(void); // Declare the EEPROM save function
+        saveStatus(); // Save to EEPROM
     }
     
-    // Print current status
-    if(writeString != NULL)
+    // Print current status only if requested
+    if(writeString != NULL && printAfterUpdate)
     {
         writeString(getStatusString(status));
     }

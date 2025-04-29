@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?> 
 <project>                                  
-  <executable name="dist/default/production/uart_fpga.X.production.elf">                 
+  <executable name="dist/default/production/MCA_Developing_V1.0.production.elf">                 
     <memory name="program">                 
       <units>bytes</units>                 
       <length>132240</length>                 
-      <used>20308</used>                     
-      <free>111932</free>                     
+      <used>27408</used>                     
+      <free>104832</free>                     
     </memory>                              
     <memory name="data">              
       <units>bytes</units>                 
       <length>32768</length>                 
-      <used>648</used>                     
-      <free>32120</free>                     
+      <used>960</used>                     
+      <free>31808</free>                     
     </memory>                              
   </executable>                            
 </project>                                 

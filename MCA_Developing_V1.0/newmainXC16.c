@@ -1,4 +1,10 @@
 //============================================================================
+//Reference Command
+//============================================================================
+//MCS,10,500,20,250,1024,4,5,40,30,1,25,1.5,1,1,1,0,500,1,40
+
+
+//============================================================================
 // Configuration Bits
 //============================================================================
 #pragma config FNOSC = FRCPLL    // Internal Fast RC oscillator with PLL
@@ -36,22 +42,23 @@
 #define PBCLK       60000000L
 #define UART_BAUD   115200
 #define I2C_FREQ    100000  // 100kHz I2C frequency
-#define DAC_ADDR    0x0C    
-#define CMD_SIZE    64      // Increased buffer size for longer commands
+#define DAC_ADDR    0x48    // DAC8571 I2C address (A0 = 0)
+//#define PGA_ADDR    0x60    // PGA I2C address (example, adjust as needed)
+#define CMD_SIZE    64
 #define RESPONSE_SIZE 512
-
+#define I2C_TIMEOUT 10000
 //============================================================================
 // Global Variables
 //============================================================================
 char cmdBuffer[CMD_SIZE];
 unsigned int cmdIndex = 0;
 bool dacConnected = false;
-
-// NEW FLAG: Control continuous FPGA data reading
+bool pgaConnected = false;  // For PGA connection status
 bool continuousFPGARead = false;
+#define EEPROM_CS   LATCbits.LATC2
 
-// Chip Select for PGA112AIDGST via SPI 
-#define PGA_CS          LATCbits.LATC2
+extern SystemStatus status;
+
 
 //============================================================================
 // Function Prototypes
@@ -61,9 +68,9 @@ void GPIO_Init(void);
 void UART1_Init(void);
 void UART2_Init(void);
 void I2C2_Init(void);
-void I2C2_Start(void);
-void I2C2_Stop(void);
-void I2C2_Write(unsigned char data);
+//void I2C2_Start(void);
+//void I2C2_Stop(void);
+//void I2C2_Write(unsigned char data);
 unsigned char I2C2_Read(unsigned char ack);
 void setDAC_Voltage(unsigned int voltage);
 unsigned int getDAC_Voltage(void);
@@ -79,13 +86,17 @@ void UART2_WriteString(const char* str);
 unsigned char UART2_DataReady(void);
 char UART2_Read(void);
 
-// SPI Functions for PGA112AIDGST
+// SPI Functions for 25LC640A EEPROM
 void SPI_Init(void);
 unsigned char SPI_Transfer(unsigned char data);
-void SPI_Write(unsigned char data);
-unsigned char SPI_Read(void);
-void PGA112_Write(unsigned char reg, unsigned char value);
-unsigned char PGA112_Read(unsigned char reg);
+void EEPROM_WriteEnable(void);
+void EEPROM_WriteDisable(void);
+unsigned char EEPROM_ReadStatus(void);
+void EEPROM_WriteStatus(unsigned char status);
+void EEPROM_WriteByte(unsigned int address, unsigned char data);
+unsigned char EEPROM_ReadByte(unsigned int address);
+void EEPROM_WriteBytes(unsigned int address, unsigned char* data, unsigned int length);
+void EEPROM_ReadBytes(unsigned int address, unsigned char* data, unsigned int length);
 
 //============================================================================
 // Utility Functions
@@ -97,6 +108,25 @@ void delay_ms(unsigned int ms) {
         asm("nop");
     }
 }
+
+
+void delay_us(unsigned int us) {
+    unsigned int i;
+    unsigned int count = us * (SYSCLK / 20000000);
+    for (i = 0; i < count; i++) {
+        asm("nop");
+    }
+}
+
+//============================================================================
+// 25LC640A EEPROM commands
+//============================================================================
+#define EEPROM_READ       0x03
+#define EEPROM_WRITE      0x02
+#define EEPROM_WRDI       0x04
+#define EEPROM_WREN       0x06
+#define EEPROM_RDSR       0x05
+#define EEPROM_WRSR       0x01
 
 //============================================================================
 // System Initialization
@@ -136,6 +166,12 @@ void GPIO_Init(void) {
     TRISBbits.TRISB3 = 0;    // SCL2
     TRISBbits.TRISB2 = 0;    // SDA2
     
+    // Configure SPI2 pins for EEPROM
+    TRISAbits.TRISA8 = 0;    // SDO2 (output)
+    TRISCbits.TRISC2 = 0;    // SS2/CS (output)
+    TRISBbits.TRISB15 = 0;   // SCK2 (output)
+    TRISBbits.TRISB13 = 1;   // SDI2 (input)
+    
     // Map pins
     U1RXR = 0b0010;          // RA4 -> U1RX
     RPA0R = 0b0001;          // RA0 -> U1TX
@@ -143,12 +179,14 @@ void GPIO_Init(void) {
     U2RXR = 0b0100;          // RB8 -> U2RX
     RPB9R = 0b0010;          // RB9 -> U2TX
     
-   // SPI Pins not included here need to add after the pin confirmation
-   
+    // SPI2 PPS Mapping
+    RPA8R = 0b0100;          // RA8 -> SDO2
+    SDI2R = 0b0011;          // RB13 -> SDI2
+    T2CKR = 0b0011;         // RB15 -> SCK2
+    
     // Lock PPS
     SYSKEY = 0x33333333;
 }
-
 //============================================================================
 // UART1 Initialization & Functions
 //============================================================================
@@ -258,80 +296,219 @@ char UART2_Read(void) {
 //============================================================================
 // I2C2 Initialization & Functions (for DAC)
 //============================================================================
+//============================================================================
+// I2C2 Implementation
+//============================================================================
 void I2C2_Init(void) {
     I2C2CON = 0;
-    I2C2BRG = (PBCLK / (2 * I2C_FREQ)) - 2;
+    I2C2BRG = (PBCLK / (2 * I2C_FREQ)) - 2;  // 100 kHz
+    I2C2CONbits.DISSLW = 1;  // Disable slew rate for 100 kHz
     I2C2CONbits.ON = 1;
+    
+    LATBbits.LATB2 = 1;  // SDA high (idle)
+    LATBbits.LATB3 = 1;  // SCL high (idle)
+    delay_us(5);
 }
 
-void I2C2_Start(void) {
+bool I2C2_Start(void) {
+    unsigned int timeout = I2C_TIMEOUT;
     I2C2CONbits.SEN = 1;
-    while(I2C2CONbits.SEN);
+    while (I2C2CONbits.SEN && --timeout);
+    if (timeout == 0 || I2C2STATbits.BCL) {
+        I2C2CONbits.ON = 0;  // Reset I2C module on error
+        delay_us(5);
+        I2C2CONbits.ON = 1;
+        return false;
+    }
+    delay_us(5);  // tHD;STA ≥ 4 µs
+    return true;
 }
 
-void I2C2_Stop(void) {
+bool I2C2_Restart(void) {
+    unsigned int timeout = I2C_TIMEOUT;
+    I2C2CONbits.RSEN = 1;
+    while (I2C2CONbits.RSEN && --timeout);
+    if (timeout == 0 || I2C2STATbits.BCL) {
+        I2C2CONbits.ON = 0;
+        delay_us(5);
+        I2C2CONbits.ON = 1;
+        return false;
+    }
+    delay_us(5);
+    return true;
+}
+
+bool I2C2_Stop(void) {
+    unsigned int timeout = I2C_TIMEOUT;
     I2C2CONbits.PEN = 1;
-    while(I2C2CONbits.PEN);
+    while (I2C2CONbits.PEN && --timeout);
+    if (timeout == 0 || I2C2STATbits.BCL) {
+        I2C2CONbits.ON = 0;
+        delay_us(5);
+        I2C2CONbits.ON = 1;
+        return false;
+    }
+    delay_us(5);  // tSU;STO ≥ 4 µs
+    return true;
 }
 
-void I2C2_Write(unsigned char data) {
+bool I2C2_Write(unsigned char data) {
+    unsigned int timeout = I2C_TIMEOUT;
     I2C2TRN = data;
-    while(I2C2STATbits.TRSTAT);
+    while (I2C2STATbits.TRSTAT && --timeout);
+    if (timeout == 0 || I2C2STATbits.BCL) {
+        I2C2CONbits.ON = 0;
+        delay_us(5);
+        I2C2CONbits.ON = 1;
+        return false;
+    }
+    delay_us(5);
+    return !I2C2STATbits.ACKSTAT;  // True if ACK, false if NACK
 }
 
 unsigned char I2C2_Read(unsigned char ack) {
+    unsigned int timeout = I2C_TIMEOUT;
     I2C2CONbits.RCEN = 1;
-    while(!I2C2STATbits.RBF);
+    while (!I2C2STATbits.RBF && --timeout);
+    if (timeout == 0 || I2C2STATbits.BCL) {
+        I2C2CONbits.ON = 0;
+        delay_us(5);
+        I2C2CONbits.ON = 1;
+        return 0;
+    }
     unsigned char data = I2C2RCV;
-    I2C2CONbits.ACKDT = !ack;
+    I2C2CONbits.ACKDT = !ack;  // 0 = ACK, 1 = NACK
     I2C2CONbits.ACKEN = 1;
-    while(I2C2CONbits.ACKEN);
+    while (I2C2CONbits.ACKEN && --timeout);
+    delay_us(5);
     return data;
 }
 
 //============================================================================
-// DAC-Related Functions
+// DAC8571 Functions
 //============================================================================
 void setDAC_Voltage(unsigned int voltage) {
-    if(voltage > 1000) voltage = 1000;  // Clamp to max value
-    if(voltage < 0) voltage = 0;        // Clamp to min value
-    
-    unsigned int dac_value = (voltage * 65535UL) / 1000; // Convert voltage to DAC value
-    
-    // Try up to 3 times to set the voltage
-    for(int attempts = 0; attempts < 3; attempts++) {
-        I2C2_Start();
-        I2C2_Write(DAC_ADDR << 1);    // Write address
-        I2C2_Write((dac_value >> 8) & 0xFF);  // High byte
-        I2C2_Write(dac_value & 0xFF);         // Low byte
+    if (voltage > 1000) voltage = 1000;
+    if (voltage < 0) voltage = 0;
+
+    unsigned int dac_value = (voltage * 65535UL) / 1000;
+
+    for (int attempts = 0; attempts < 3; attempts++) {
+        if (!I2C2_Start()) continue;
+        if (!I2C2_Write(DAC_ADDR << 1)) {
+            I2C2_Stop();
+            delay_ms(10);
+            continue;
+        }
+        I2C2_Write(0x10);  // Control byte: Store and update
+        I2C2_Write((dac_value >> 8) & 0xFF);  // MSB
+        I2C2_Write(dac_value & 0xFF);         // LSB
         I2C2_Stop();
-        
-        // Verify the setting
+
         unsigned int read_voltage = getDAC_Voltage();
-        if(abs(read_voltage - voltage) <= 2) { // Allow small tolerance
+        if (abs(read_voltage - voltage) <= 2) {
             break;
         }
-        delay_ms(10);  // Wait before retry
+        delay_ms(10);
     }
 }
 
 unsigned int getDAC_Voltage(void) {
-    unsigned int dac_value;
-    I2C2_Start();
-    I2C2_Write((DAC_ADDR << 1) | 1);  // Read address
-    dac_value = I2C2_Read(1) << 8;    // High byte
-    dac_value |= I2C2_Read(0);        // Low byte
+    unsigned int dac_value = 0;
+    if (!I2C2_Start()) return 0;
+    if (!I2C2_Write(DAC_ADDR << 1)) {
+        I2C2_Stop();
+        return 0;
+    }
+    I2C2_Write(0x90);  // Control byte: Read DAC
+    if (!I2C2_Restart()) {
+        I2C2_Stop();
+        return 0;
+    }
+    if (!I2C2_Write((DAC_ADDR << 1) | 1)) {
+        I2C2_Stop();
+        return 0;
+    }
+    dac_value = I2C2_Read(1) << 8;  // MSB (ACK)
+    dac_value |= I2C2_Read(0);      // LSB (NACK)
     I2C2_Stop();
-    return (dac_value * 1000) / 65535; // Convert DAC value to voltage
+    return (dac_value * 1000) / 65535;
 }
 
 bool checkDAC_Connection(void) {
-    I2C2_Start();
-    I2C2_Write(DAC_ADDR << 1);    // Write address
-    bool connected = !I2C2STATbits.ACKSTAT;  // Check if ACK received
+    if (!I2C2_Start()) return false;
+    bool connected = I2C2_Write(DAC_ADDR << 1);
     I2C2_Stop();
     return connected;
 }
+
+////============================================================================
+//// PGA-Related Functions
+////============================================================================
+//void setPGA_Gain(void) {
+//    // Map courseGain (0-63) to PGA gain steps (1, 2, 4, 8, 16, 32, 64, 128)
+//    unsigned char gain_code;
+//    unsigned int gain;
+//    if(status.courseGain <= 1) gain = 1;
+//    else if(status.courseGain <= 3) gain = 2;
+//    else if(status.courseGain <= 7) gain = 4;
+//    else if(status.courseGain <= 15) gain = 8;
+//    else if(status.courseGain <= 31) gain = 16;
+//    else if(status.courseGain <= 47) gain = 32;
+//    else if(status.courseGain <= 63) gain = 64;
+//    else gain = 128;  // Max gain if out of range
+//
+//    switch(gain) {
+//        case 1:   gain_code = 0; break;
+//        case 2:   gain_code = 1; break;
+//        case 4:   gain_code = 2; break;
+//        case 8:   gain_code = 3; break;
+//        case 16:  gain_code = 4; break;
+//        case 32:  gain_code = 5; break;
+//        case 64:  gain_code = 6; break;
+//        case 128: gain_code = 7; break;
+//        default:  gain_code = 0;
+//    }
+//
+//    I2C2_Start();
+//    I2C2_Write(PGA_ADDR << 1);
+//    I2C2_Write(0x00);  // Gain control register (adjust per PGA datasheet)
+//    I2C2_Write(gain_code);
+//    I2C2_Stop();
+//}
+//
+//unsigned int getPGA_Gain(void) {
+//    unsigned char gain_code;
+//    I2C2_Start();
+//    I2C2_Write(PGA_ADDR << 1);
+//    I2C2_Write(0x00);
+//    I2C2_Restart();
+//    I2C2_Write((PGA_ADDR << 1) | 1);
+//    gain_code = I2C2_Read(0);
+//    I2C2_Stop();
+//
+//    switch(gain_code) {
+//        case 0: return 1;
+//        case 1: return 2;
+//        case 2: return 4;
+//        case 3: return 8;
+//        case 4: return 16;
+//        case 5: return 32;
+//        case 6: return 64;
+//        case 7: return 128;
+//        default: return 1;
+//    }
+//}
+//
+//bool checkPGA_Connection(void) {
+//    I2C2_Start();
+//    I2C2_Write(PGA_ADDR << 1);
+//    bool connected = !I2C2STATbits.ACKSTAT;
+//    I2C2_Stop();
+//    return connected;
+//}
+
+
 
 //============================================================================
 // FPGA-Related Functions
@@ -361,7 +538,7 @@ void readFPGAData(void) {
 }
 
 //============================================================================
-// SPI Functions for PGA112AIDGST
+// SPI Functions for 25LC640A I/P (EEPROM)
 //============================================================================
 void SPI_Init(void) {
     // Configure SPI1 for Master mode, mode 0 (CKP=0, CKE=1)
@@ -371,8 +548,11 @@ void SPI_Init(void) {
     SPI1CONbits.CKP = 0;      // Clock idle low
     SPI1CONbits.CKE = 1;      // Data is shifted out on the rising edge
     SPI1CONbits.SMP = 0;      // Input sampled at middle of data output time
-    SPI1BRG = 1;              // Set baud rate (adjust as needed)
+    SPI1BRG = 1;              // Set baud rate (adjust as needed for EEPROM)
     SPI1CONbits.ON = 1;       // Enable SPI module
+    
+    // Initialize chip select pin
+    EEPROM_CS = 1;            // Start with CS high (inactive)
 }
 
 unsigned char SPI_Transfer(unsigned char data) {
@@ -389,21 +569,192 @@ unsigned char SPI_Read(void) {
     return SPI_Transfer(0xFF);  // Send dummy byte and return received data
 }
 
-void PGA112_Write(unsigned char reg, unsigned char value) {
-    // Pull CS low to start communication
-    PGA_CS = 0;
-    SPI_Write(reg);
-    SPI_Write(value);
-    PGA_CS = 1; // Pull CS high to end communication
+void EEPROM_WriteEnable(void) {
+    EEPROM_CS = 0;        // Assert CS (active low)
+    SPI_Transfer(EEPROM_WREN);
+    EEPROM_CS = 1;        // Deassert CS
 }
 
-unsigned char PGA112_Read(unsigned char reg) {
-    unsigned char value;
-    PGA_CS = 0;
-    SPI_Write(reg);  // Send register address (protocol-dependent)
-    value = SPI_Read();
-    PGA_CS = 1;
-    return value;
+void EEPROM_WriteDisable(void) {
+    EEPROM_CS = 0;
+    SPI_Transfer(EEPROM_WRDI);
+    EEPROM_CS = 1;
+}
+
+unsigned char EEPROM_ReadStatus(void) {
+    unsigned char status;
+    EEPROM_CS = 0;
+    SPI_Transfer(EEPROM_RDSR);
+    status = SPI_Transfer(0xFF);
+    EEPROM_CS = 1;
+    return status;
+}
+
+void EEPROM_WriteStatus(unsigned char status) {
+    EEPROM_WriteEnable();
+    EEPROM_CS = 0;
+    SPI_Transfer(EEPROM_WRSR);
+    SPI_Transfer(status);
+    EEPROM_CS = 1;
+    
+    // Wait for write to complete
+    while(EEPROM_ReadStatus() & 0x01);
+}
+
+void EEPROM_WriteByte(unsigned int address, unsigned char data) {
+    // Enable write operation
+    EEPROM_WriteEnable();
+    
+    // Begin communication
+    EEPROM_CS = 0;
+    
+    // Send write command followed by 16-bit address (MSB first)
+    SPI_Transfer(EEPROM_WRITE);
+    SPI_Transfer((address >> 8) & 0xFF);  // High byte of address
+    SPI_Transfer(address & 0xFF);         // Low byte of address
+    
+    // Send data
+    SPI_Transfer(data);
+    
+    // End communication
+    EEPROM_CS = 1;
+    
+    // Wait for write to complete
+    while(EEPROM_ReadStatus() & 0x01);
+}
+
+unsigned char EEPROM_ReadByte(unsigned int address) {
+    unsigned char data;
+    
+    // Begin communication
+    EEPROM_CS = 0;
+    
+    // Send read command followed by 16-bit address (MSB first)
+    SPI_Transfer(EEPROM_READ);
+    SPI_Transfer((address >> 8) & 0xFF);  // High byte of address
+    SPI_Transfer(address & 0xFF);         // Low byte of address
+    
+    // Read data
+    data = SPI_Transfer(0xFF);
+    
+    // End communication
+    EEPROM_CS = 1;
+    
+    return data;
+}
+
+// Write multiple bytes to EEPROM (supports page writes)
+void EEPROM_WriteBytes(unsigned int address, unsigned char* data, unsigned int length) {
+    unsigned int i;
+    unsigned int page_offset;
+    unsigned int bytes_to_write;
+    
+    // Process data in chunks of page size (32 bytes for 25LC640A)
+    while(length > 0) {
+        // Calculate how many bytes we can write in current page
+        page_offset = address % 32;
+        bytes_to_write = 32 - page_offset;
+        
+        if(bytes_to_write > length) {
+            bytes_to_write = length;
+        }
+        
+        // Enable write operation
+        EEPROM_WriteEnable();
+        
+        // Begin communication
+        EEPROM_CS = 0;
+        
+        // Send write command followed by 16-bit address
+        SPI_Transfer(EEPROM_WRITE);
+        SPI_Transfer((address >> 8) & 0xFF);  // High byte of address
+        SPI_Transfer(address & 0xFF);         // Low byte of address
+        
+        // Send data
+        for(i = 0; i < bytes_to_write; i++) {
+            SPI_Transfer(data[i]);
+        }
+        
+        // End communication
+        EEPROM_CS = 1;
+        
+        // Wait for write to complete
+        while(EEPROM_ReadStatus() & 0x01);
+        
+        // Update variables for next page
+        address += bytes_to_write;
+        data += bytes_to_write;
+        length -= bytes_to_write;
+    }
+}
+
+// Read multiple bytes from EEPROM
+void EEPROM_ReadBytes(unsigned int address, unsigned char* data, unsigned int length) {
+    unsigned int i;
+    
+    // Begin communication
+    EEPROM_CS = 0;
+    
+    // Send read command followed by 16-bit address
+    SPI_Transfer(EEPROM_READ);
+    SPI_Transfer((address >> 8) & 0xFF);  // High byte of address
+    SPI_Transfer(address & 0xFF);         // Low byte of address
+    
+    // Read data
+    for(i = 0; i < length; i++) {
+        data[i] = SPI_Transfer(0xFF);
+    }
+    
+    // End communication
+    EEPROM_CS = 1;
+}
+
+// Store system status to EEPROM
+void saveStatus(void) {
+    unsigned char buffer[128];  // Increased buffer size to hold larger status structure
+    
+    // Get the actual size of the structure
+    size_t structSize = sizeof(SystemStatus);
+    
+    // Make sure buffer is large enough
+    if (structSize > sizeof(buffer)) {
+        UART1_WriteString("Error: Status structure too large for buffer\r\n");
+        return;
+    }
+    
+    // Copy status to buffer
+    memcpy(buffer, &status, structSize);
+    
+    // Write status to EEPROM starting at address 0
+    EEPROM_WriteBytes(0, buffer, structSize);
+    
+    char debugMsg[64];
+    sprintf(debugMsg, "Saved status to EEPROM (size: %d bytes)\r\n", (int)structSize);
+    UART1_WriteString(debugMsg);
+}
+
+// Load system status from EEPROM
+void loadStatus(void) {
+    unsigned char buffer[128];  // Increased buffer size to hold larger status structure
+    
+    // Get the actual size of the structure
+    size_t structSize = sizeof(SystemStatus);
+    
+    // Make sure buffer is large enough
+    if (structSize > sizeof(buffer)) {
+        UART1_WriteString("Error: Status structure too large for buffer\r\n");
+        return;
+    }
+    
+    // Read status from EEPROM starting at address 0
+    EEPROM_ReadBytes(0, buffer, structSize);
+    
+    // Copy data to status structure
+    memcpy(&status, buffer, structSize);
+    
+    char debugMsg[64];
+    sprintf(debugMsg, "Loaded status from EEPROM (size: %d bytes)\r\n", (int)structSize);
+    UART1_WriteString(debugMsg);
 }
 
 //============================================================================
@@ -430,7 +781,7 @@ void processCommand(const char* cmd) {
     
     // System Control Commands
     if(strcmp(command, "START") == 0) {
-        status.systemState = 1;
+//        status.systemState = 1;
         
         // Enable continuous FPGA data reading
         sendFPGA_SimpleCommand("start");
@@ -441,7 +792,7 @@ void processCommand(const char* cmd) {
         updateAndPrintStatus(UART1_WriteString, &status, "systemState", 1);
     }
     else if(strcmp(command, "STOP") == 0) {
-        status.systemState = 0;
+//        status.systemState = 0;
         
         // Disable continuous FPGA data reading
         continuousFPGARead = false;
@@ -457,21 +808,51 @@ void processCommand(const char* cmd) {
         printStatusUpdate(UART1_WriteString, &status);
     }
     else if(strcmp(command, "STATUS") == 0) {
+//        loadStatus();
         printStatusUpdate(UART1_WriteString, &status);
     }
     // DAC Commands
-    else if(strcmp(command, "SETV") == 0) {
+    else if (strcmp(command, "SETV") == 0) {
         value = atoi(param1);
-        if(value > 0 && value <= 1000) {
+        if (value > 0 && value <= 1000) {
             setDAC_Voltage(value);
             updateAndPrintStatus(UART1_WriteString, &status, "voltage", value);
+            char msg[64];
+            sprintf(msg, "DAC Voltage set to: %u mV\r\n", value);
+            UART1_WriteString(msg);
         } else {
-            UART1_WriteString("Error: Voltage must be between 1 and 1000V\r\n");
+            UART1_WriteString("Error: Voltage must be between 1 and 1000 mV\r\n");
         }
     }
-    else if(strcmp(command, "GETV?") == 0) {
+    else if (strcmp(command, "GETV?") == 0) {
         value = getDAC_Voltage();
+        char msg[64];
+        sprintf(msg, "DAC Voltage: %u mV\r\n", value);
+        UART1_WriteString(msg);
         updateAndPrintStatus(UART1_WriteString, &status, "voltage", value);
+    }
+    // PGA Commands
+    else if(strcmp(command, "SETCG") == 0 || strcmp(command, "CG") == 0) {
+        value = atoi(param2);
+        if(value >= 0 && value <= 63) {
+            status.courseGain = value;  // Update status
+//            setPGA_Gain();              // Set PGA gain based on courseGain
+            updateAndPrintStatus(UART1_WriteString, &status, "courseGain", value);
+            saveStatus();
+        } else {
+            UART1_WriteString("Error: Coarse gain must be between 0 and 63\r\n");
+        }
+    }
+    else if(strcmp(command, "SETFG") == 0 || strcmp(command, "FG") == 0) {
+        value = atoi(param2);
+        if(value >= 0 && value <= 255) {
+            status.fineGain = value;    // Update status (optional use)
+//            setPGA_Gain();              // Fine gain could refine courseGain if needed
+            updateAndPrintStatus(UART1_WriteString, &status, "fineGain", value);
+            saveStatus();
+        } else {
+            UART1_WriteString("Error: Fine gain must be between 0 and 255\r\n");
+        }
     }
     // FPGA - ADC Gain Commands
     else if(strcmp(command, "SETCG") == 0 || strcmp(command, "CG") == 0) {
@@ -682,28 +1063,32 @@ void processModeCommand(const char *cmd) {
         int pileupReject  = atoi(tokens[16]);
         int HV            = atoi(tokens[17]);
         int HV_on_off     = atoi(tokens[18]);
+        
+        // Set mode first (don't print)
+        updateAndPrintStatus(UART1_WriteString, &status, "!mode", 0); // 0 = PHA mode
 
-        // Update system status with parsed values
-        updateAndPrintStatus(UART1_WriteString, &status, "presetTime", presetTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "counts", counts);
-        updateAndPrintStatus(UART1_WriteString, &status, "startChannel", startChannel);
-        updateAndPrintStatus(UART1_WriteString, &status, "endChannel", endChannel);
-        updateAndPrintStatus(UART1_WriteString, &status, "noOfChannels", noOfChannels);
-        updateAndPrintStatus(UART1_WriteString, &status, "LLD", LLD);
-        updateAndPrintStatus(UART1_WriteString, &status, "ULD", ULD);
-        updateAndPrintStatus(UART1_WriteString, &status, "coarseGain", coarseGain);
-        updateAndPrintStatus(UART1_WriteString, &status, "fineGain", fineGain);
-        updateAndPrintStatus(UART1_WriteString, &status, "inputPolarity", inputPolarity);
-        updateAndPrintStatus(UART1_WriteString, &status, "threshold", threshold);
-        updateAndPrintStatus(UART1_WriteString, &status, "riseTime", riseTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "flatTime", flatTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "poleZeros", poleZeros);
-        updateAndPrintStatus(UART1_WriteString, &status, "digitalBLR", digitalBLR);
-        updateAndPrintStatus(UART1_WriteString, &status, "pileupReject", pileupReject);
-        updateAndPrintStatus(UART1_WriteString, &status, "HV", HV);
-        updateAndPrintStatus(UART1_WriteString, &status, "HV_on_off", HV_on_off);
+        // Update system status with parsed values (don't print after each update)
+        updateAndPrintStatus(UART1_WriteString, &status, "!presetTime", presetTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!counts", counts);
+        updateAndPrintStatus(UART1_WriteString, &status, "!startChannel", startChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "!endChannel", endChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "!noOfChannels", noOfChannels);
+        updateAndPrintStatus(UART1_WriteString, &status, "!LLD", LLD);
+        updateAndPrintStatus(UART1_WriteString, &status, "!ULD", ULD);
+        updateAndPrintStatus(UART1_WriteString, &status, "!courseGain", coarseGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "!fineGain", fineGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "!inputPolarity", inputPolarity);
+        updateAndPrintStatus(UART1_WriteString, &status, "!threshold", threshold);
+        updateAndPrintStatus(UART1_WriteString, &status, "!riseTime", riseTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!flatTime", flatTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!poleZero", poleZeros);
+        updateAndPrintStatus(UART1_WriteString, &status, "!digitalBLR", digitalBLR);
+        updateAndPrintStatus(UART1_WriteString, &status, "!pileupReject", pileupReject);
+        updateAndPrintStatus(UART1_WriteString, &status, "!voltage", HV);
+        updateAndPrintStatus(UART1_WriteString, &status, "hvStatus", HV_on_off); // Print after last update
 
         UART1_WriteString("PHA mode configuration accepted.\r\n");
+        saveStatus();
     }
     else if(strcmp(tokens[0], "MCS") == 0) {
         // Expected 19 parameters after "MCS" (total tokens = 20)
@@ -731,29 +1116,32 @@ void processModeCommand(const char *cmd) {
         int HV_on_off     = atoi(tokens[18]);
         int dwellTime     = atoi(tokens[19]);
 
-        // Update system status with parsed values
-        updateAndPrintStatus(UART1_WriteString, &status, "presetTime", presetTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "counts", counts);
-        updateAndPrintStatus(UART1_WriteString, &status, "startChannel", startChannel);
-        updateAndPrintStatus(UART1_WriteString, &status, "endChannel", endChannel);
-        updateAndPrintStatus(UART1_WriteString, &status, "noOfChannels", noOfChannels);
-        updateAndPrintStatus(UART1_WriteString, &status, "LLD", LLD);
-        updateAndPrintStatus(UART1_WriteString, &status, "ULD", ULD);
-        updateAndPrintStatus(UART1_WriteString, &status, "coarseGain", coarseGain);
-        updateAndPrintStatus(UART1_WriteString, &status, "fineGain", fineGain);
-        updateAndPrintStatus(UART1_WriteString, &status, "inputPolarity", inputPolarity);
-        updateAndPrintStatus(UART1_WriteString, &status, "threshold", threshold);
-        updateAndPrintStatus(UART1_WriteString, &status, "riseTime", riseTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "flatTime", flatTime);
-        updateAndPrintStatus(UART1_WriteString, &status, "poleZeros", poleZeros);
-        updateAndPrintStatus(UART1_WriteString, &status, "digitalBLR", digitalBLR);
-        updateAndPrintStatus(UART1_WriteString, &status, "pileupReject", pileupReject);
-        updateAndPrintStatus(UART1_WriteString, &status, "HV", HV);
-        updateAndPrintStatus(UART1_WriteString, &status, "HV_on_off", HV_on_off);
-        updateAndPrintStatus(UART1_WriteString, &status, "dwellTime", dwellTime);
+        // Set mode first (don't print)
+        updateAndPrintStatus(UART1_WriteString, &status, "!mode", 1); // 1 = MCS mode
 
-        // Optionally, send corresponding FPGA/DAC commands here.
+        // Update system status with parsed values (don't print after each update)
+        updateAndPrintStatus(UART1_WriteString, &status, "!presetTime", presetTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!counts", counts);
+        updateAndPrintStatus(UART1_WriteString, &status, "!startChannel", startChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "!endChannel", endChannel);
+        updateAndPrintStatus(UART1_WriteString, &status, "!noOfChannels", noOfChannels);
+        updateAndPrintStatus(UART1_WriteString, &status, "!LLD", LLD);
+        updateAndPrintStatus(UART1_WriteString, &status, "!ULD", ULD);
+        updateAndPrintStatus(UART1_WriteString, &status, "!courseGain", coarseGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "!fineGain", fineGain);
+        updateAndPrintStatus(UART1_WriteString, &status, "!inputPolarity", inputPolarity);
+        updateAndPrintStatus(UART1_WriteString, &status, "!threshold", threshold);
+        updateAndPrintStatus(UART1_WriteString, &status, "!riseTime", riseTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!flatTime", flatTime);
+        updateAndPrintStatus(UART1_WriteString, &status, "!poleZero", poleZeros);
+        updateAndPrintStatus(UART1_WriteString, &status, "!digitalBLR", digitalBLR);
+        updateAndPrintStatus(UART1_WriteString, &status, "!pileupReject", pileupReject);
+        updateAndPrintStatus(UART1_WriteString, &status, "!voltage", HV);
+        updateAndPrintStatus(UART1_WriteString, &status, "!hvStatus", HV_on_off);
+        updateAndPrintStatus(UART1_WriteString, &status, "dwellTime", dwellTime); // Print after last update
+
         UART1_WriteString("MCS mode configuration accepted.\r\n");
+        saveStatus();
     }
     else {
         UART1_WriteString("Error: Invalid mode specified. Use 'PHA' or 'MCS'.\r\n");
@@ -768,7 +1156,7 @@ void performPOR(void) {
     GPIO_Init();
     UART1_Init();
     UART2_Init();
-//    I2C2_Init();
+    I2C2_Init();
     // SPI_Init();
     
     // Load saved status values first
@@ -805,6 +1193,8 @@ void performPOR(void) {
     // Just report connection status for information
     UART1_WriteString("DAC: ");
     UART1_WriteString(dacConnected ? "Connected\r\n" : "Not Connected\r\n");
+    UART1_WriteString("PGA: ");
+    UART1_WriteString(pgaConnected ? "Connected\r\n" : "Not Connected\r\n");
     
     UART1_WriteString("Power-On Reset complete\r\n");
     printStatusUpdate(UART1_WriteString, &status);
@@ -818,14 +1208,19 @@ int main(void) {
     GPIO_Init();
     UART1_Init();
     UART2_Init();
-    // I2C2_Init();  
-    // SPI_Init();
+    I2C2_Init();  
+//     SPI_Init();
+        // Just report connection status for information
     
     // Restore system status
     initStatus();
     
     // Initial message
     UART1_WriteString("\r\nPIC32 Control System Ready\r\n");
+    UART1_WriteString("DAC: ");
+    UART1_WriteString(dacConnected ? "Connected\r\n" : "Not Connected\r\n");
+    UART1_WriteString("PGA: ");
+    UART1_WriteString(pgaConnected ? "Connected\r\n" : "Not Connected\r\n");
     
     while(1) {
         // Check for incoming UART1 data character-by-character
@@ -865,8 +1260,7 @@ int main(void) {
         // Non-blocking FPGA data read if enabled
         if(continuousFPGARead == true) {
             readFPGAData();
-        }
-        
+        }        
     }
     
     return 0;
