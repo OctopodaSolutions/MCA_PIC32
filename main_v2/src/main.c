@@ -2,7 +2,7 @@
   Main Source File with EEPROM Storage for PHA/MCA Settings and MCP2200 Integration
   Company: Microchip Technology Inc.
   File Name: main.c
-  Summary: Integrates UART1, UART2, I2C1, and SPI1 for FPGA and EEPROM interaction, with MCP2200 for USB communication.
+  Summary: Integrates UART1, UART2, I2C2, and SPI2 for FPGA and EEPROM interaction, with MCP2200 for USB communication.
   Description: Parses commands, controls FPGA, DAC, and auto-saves settings to EEPROM on change. Uses MCP2200 for USB-to-UART communication.
            Modified to read 512-byte FPGA spectrum data every 5 seconds and print via UART1.
 *******************************************************************************/
@@ -155,59 +155,38 @@ static void SendUART1Message(const char *message) {
     }
 }
 
-//static void PrintSpectrumData(void) {
-//    char hexBuffer[128];
-//    snprintf(hexBuffer, sizeof(hexBuffer), "Received FPGA Spectrum Data (%u bytes):", SPECTRUM_DATA_SIZE);
-//    SendUART1Message(hexBuffer);
-//    SendUART1Message("{");
-//
-//    for (uint32_t i = 0; i < SPECTRUM_DATA_SIZE; i += 16) {
-//        snprintf(hexBuffer, sizeof(hexBuffer),
-//                 "    0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, "
-//                 "0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X%s",
-//                 spectrumData[i], spectrumData[i + 1], spectrumData[i + 2], spectrumData[i + 3],
-//                 spectrumData[i + 4], spectrumData[i + 5], spectrumData[i + 6], spectrumData[i + 7],
-//                 spectrumData[i + 8], spectrumData[i + 9], spectrumData[i + 10], spectrumData[i + 11],
-//                 spectrumData[i + 12], spectrumData[i + 13], spectrumData[i + 14], spectrumData[i + 15],
-//                 (i + 16 < SPECTRUM_DATA_SIZE) ? "," : "");
-//        SendUART1Message(hexBuffer);
-//    }
-//    SendUART1Message("};");
-//    snprintf(hexBuffer, sizeof(hexBuffer), "First 8 bytes: 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X",
-//             spectrumData[0], spectrumData[1], spectrumData[2], spectrumData[3],
-//             spectrumData[4], spectrumData[5], spectrumData[6], spectrumData[7]);
-//    SendUART1Message(hexBuffer);
-//}
-
+// Print spectrum data as a single array of decimal integers
 static void PrintSpectrumData(void) {
-    char hexBuffer[256];
-    snprintf(hexBuffer, sizeof(hexBuffer), "PrintSpectrumData: Received FPGA Spectrum Data (%u integers):", SPECTRUM_DATA_SIZE);
-    SendUART1Message(hexBuffer);
+    char buffer[256]; 
+    snprintf(buffer, sizeof(buffer), "Received FPGA Spectrum Data (%u bytes):", SPECTRUM_DATA_SIZE);
+    SendUART1Message(buffer);
     SendUART1Message("{");
 
-    for (uint32_t i = 0; i < SPECTRUM_DATA_SIZE; i += 16) {
-        snprintf(hexBuffer, sizeof(hexBuffer),
-                 "    %3u, %3u, %3u, %3u, %3u, %3u, %3u, %3u, "
-                 "%3u, %3u, %3u, %3u, %3u, %3u, %3u, %3u%s",
-                 (unsigned int)spectrumData[i], (unsigned int)spectrumData[i + 1],
-                 (unsigned int)spectrumData[i + 2], (unsigned int)spectrumData[i + 3],
-                 (unsigned int)spectrumData[i + 4], (unsigned int)spectrumData[i + 5],
-                 (unsigned int)spectrumData[i + 6], (unsigned int)spectrumData[i + 7],
-                 (unsigned int)spectrumData[i + 8], (unsigned int)spectrumData[i + 9],
-                 (unsigned int)spectrumData[i + 10], (unsigned int)spectrumData[i + 11],
-                 (unsigned int)spectrumData[i + 12], (unsigned int)spectrumData[i + 13],
-                 (unsigned int)spectrumData[i + 14], (unsigned int)spectrumData[i + 15],
-                 (i + 16 < SPECTRUM_DATA_SIZE) ? "," : "");
-        SendUART1Message(hexBuffer);
+    char dataBuffer[4096]; 
+    size_t offset = 0;
+    for (uint32_t i = 0; i < SPECTRUM_DATA_SIZE; i++) {
+        int value = (int)spectrumData[i]; 
+        offset += snprintf(dataBuffer + offset, sizeof(dataBuffer) - offset, "%d", value);
+        
+        if (i < SPECTRUM_DATA_SIZE - 1) {
+            offset += snprintf(dataBuffer + offset, sizeof(dataBuffer) - offset, ", ");
+        }
+        if (offset > sizeof(buffer) - 50 || i == SPECTRUM_DATA_SIZE - 1) {
+            strncpy(buffer, dataBuffer, sizeof(buffer) - 1);
+            buffer[sizeof(buffer) - 1] = '\0'; 
+            SendUART1Message(buffer);
+            offset = 0;
+            memset(dataBuffer, 0, sizeof(dataBuffer)); 
+        }
     }
-    SendUART1Message("};");
 
-    snprintf(hexBuffer, sizeof(hexBuffer), "First 8 values: %u, %u, %u, %u, %u, %u, %u, %u",
-             (unsigned int)spectrumData[0], (unsigned int)spectrumData[1],
-             (unsigned int)spectrumData[2], (unsigned int)spectrumData[3],
-             (unsigned int)spectrumData[4], (unsigned int)spectrumData[5],
-             (unsigned int)spectrumData[6], (unsigned int)spectrumData[7]);
-    SendUART1Message(hexBuffer);
+    SendUART1Message("}");
+
+//    // Print first 8 values as a summary
+//    snprintf(buffer, sizeof(buffer), "First 8 values: %d, %d, %d, %d, %d, %d, %d, %d",
+//             (int)spectrumData[0], (int)spectrumData[1], (int)spectrumData[2], (int)spectrumData[3],
+//             (int)spectrumData[4], (int)spectrumData[5], (int)spectrumData[6], (int)spectrumData[7]);
+//    SendUART1Message(buffer);
 }
 
 // MCP2200 Initialization Functions
@@ -252,8 +231,8 @@ uint8_t EEPROM_ReadStatus(void) {
     uint8_t rxBuffer[2];
     
     EEPROM_CS_LOW();
-    SPI1_WriteRead(txBuffer, 2, rxBuffer, 2);
-    while (SPI1_IsBusy());
+    SPI2_WriteRead(txBuffer, 2, rxBuffer, 2);
+    while (SPI2_IsBusy());
     EEPROM_CS_HIGH();
     for (volatile uint32_t i = 0; i < DELAY_1MS_CYCLES; i++);
     return rxBuffer[1];
@@ -274,8 +253,8 @@ void EEPROM_WriteEnable(void) {
     uint8_t txBuffer = EEPROM_WREN;
     
     EEPROM_CS_LOW();
-    SPI1_Write(&txBuffer, 1);
-    while (SPI1_IsBusy());
+    SPI2_Write(&txBuffer, 1);
+    while (SPI2_IsBusy());
     EEPROM_CS_HIGH();
     for (volatile uint32_t i = 0; i < DELAY_1MS_CYCLES; i++);
 }
@@ -301,10 +280,10 @@ bool EEPROM_WriteBytes(uint16_t address, uint8_t* data, uint8_t length) {
         
         EEPROM_WriteEnable();
         EEPROM_CS_LOW();
-        SPI1_Write(txBuffer, chunkSize + 3);
+        SPI2_Write(txBuffer, chunkSize + 3);
         
         uint32_t timeout = 1000000;
-        while (SPI1_IsBusy() && timeout--) {
+        while (SPI2_IsBusy() && timeout--) {
             if (timeout == 0) {
                 SendUART1Message("EEPROM: SPI Write Timeout");
                 EEPROM_CS_HIGH();
@@ -331,10 +310,10 @@ bool EEPROM_ReadBytes(uint16_t address, uint8_t* buffer, uint8_t length) {
     uint8_t rxBuffer[MAX_EEPROM_SIZE + 3];
     
     EEPROM_CS_LOW();
-    SPI1_WriteRead(txBuffer, length + 3, rxBuffer, length + 3);
+    SPI2_WriteRead(txBuffer, length + 3, rxBuffer, length + 3);
     
     uint32_t timeout = 1000000;
-    while (SPI1_IsBusy() && timeout--) {
+    while (SPI2_IsBusy() && timeout--) {
         if (timeout == 0) {
             SendUART1Message("EEPROM: SPI Read Timeout");
             EEPROM_CS_HIGH();
@@ -536,8 +515,8 @@ static bool MCP4725_WriteDAC(uint16_t hvValue, uint8_t hvOn) {
     uint16_t dacValue = (uint16_t)(((float)hvValue / 1000.0) * 2048.5);
     uint8_t data[2] = {(dacValue >> 8) & 0x0F, dacValue & 0xFF};
 
-    bool success = I2C1_Write(MCP4725_ADDRESS, data, 2);
-    while (I2C1_IsBusy());
+    bool success = I2C2_Write(MCP4725_ADDRESS, data, 2);
+    while (I2C2_IsBusy());
     
     if (success) {
         float dacVoltage = (float)dacValue * 5.0 / 4095.0;
@@ -547,7 +526,7 @@ static bool MCP4725_WriteDAC(uint16_t hvValue, uint8_t hvOn) {
         SendUART1Message(buffer);
     } else {
         char buffer[64];
-        snprintf(buffer, sizeof(buffer), "MCP4725: DAC write failed, I2C Error: %u", I2C1_ErrorGet());
+        snprintf(buffer, sizeof(buffer), "MCP4725: DAC write failed, I2C Error: %u", I2C2_ErrorGet());
         SendUART1Message(buffer);
     }
     return success;
@@ -574,11 +553,18 @@ static void PrintDeviceInfo(void) {
 // Add a flag to prevent processing during buffer reset
 static volatile bool uart2Processing = false;
 
-// Modified ProcessUART2Rx to improve synchronization and error handling
-// Updated ProcessUART2Rx for 4096 bytes
+
+//ProcessUART2Rx for polling-based UART2 data processing
 static void ProcessUART2Rx(void) {
     if (uart2Processing) return;
     uart2Processing = true;
+
+    static enum {
+        WAIT_START,
+        WAIT_SEQ,
+        WAIT_DATA,
+        WAIT_END
+    } state = WAIT_START;
 
     size_t bytesRead = UART2_ReadCountGet();
     if (bytesRead == 0) {
@@ -588,27 +574,37 @@ static void ProcessUART2Rx(void) {
 
     UART_ERROR errors = UART2_ErrorGet();
     if (errors != UART_ERROR_NONE) {
-        char buffer[64];
-        snprintf(buffer, sizeof(buffer), "UART2: Error 0x%X", errors);
+        char buffer[128];
+        snprintf(buffer, sizeof(buffer), "UART2: Error 0x%X (Framing: %d, Overrun: %d)", 
+                 errors, (errors & UART_ERROR_FRAMING) != 0, (errors & UART_ERROR_OVERRUN) != 0);
         SendUART1Message(buffer);
+        
+        // Clear overrun error
+        if (errors & UART_ERROR_OVERRUN) {
+            U2STAbits.OERR = 0; // Clear overrun flag
+        }
+        
         UART2_ReadAbort();
         memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
         UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
-        expectingStartByte = true;
+        state = WAIT_START;
         spectrumDataIndex = 0;
         spectrumDataReceived = false;
         uart2Processing = false;
+        expectingStartByte = true;
         return;
     }
 
     for (size_t i = 0; i < bytesRead; i++) {
         uint8_t byte = uart2RxBuffer[i];
 
-        if (!expectingStartByte && (Timer1_GetTicks() - packetStartTime > PACKET_TIMEOUT)) {
-            char buffer[64];
-            snprintf(buffer, sizeof(buffer), "UART2: Packet timeout after %u bytes (Seq: %u)", spectrumDataIndex, packetSeqNum);
+        // Timeout check
+        if (state != WAIT_START && (Timer1_GetTicks() - packetStartTime > PACKET_TIMEOUT)) {
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer), "UART2: Packet timeout in state %d after %u bytes (Seq: %u)", 
+                     state, spectrumDataIndex, packetSeqNum);
             SendUART1Message(buffer);
-            expectingStartByte = true;
+            state = WAIT_START;
             spectrumDataIndex = 0;
             spectrumDataReceived = false;
             UART2_ReadAbort();
@@ -618,65 +614,82 @@ static void ProcessUART2Rx(void) {
             return;
         }
 
-        if (expectingStartByte) {
-            if (byte == FPGA_START_BIT) {
-                expectingStartByte = false;
-                spectrumDataIndex = 0;
-                spectrumDataReceived = false;
-                packetStartTime = Timer1_GetTicks();
-            }
-            continue;
-        }
-
-        if (spectrumDataIndex == 0) {
-            packetSeqNum = byte;
-            spectrumDataIndex++;
-            continue;
-        }
-
-        if (spectrumDataIndex <= SPECTRUM_DATA_SIZE) {
-            spectrumData[spectrumDataIndex - 1] = byte;
-            spectrumDataIndex++;
-            continue;
-        }
-
-        if (spectrumDataIndex == SPECTRUM_DATA_SIZE + 1) {
-            if (byte == FPGA_END_BIT) {
-                spectrumDataReceived = true;
-                expectingStartByte = true;
-                char buffer[64];
-                snprintf(buffer, sizeof(buffer), "UART2: Complete packet received (Seq: %u)", packetSeqNum);
-                SendUART1Message(buffer);
-                PrintSpectrumData();
-                lastSpectrumReadTime = Timer1_GetTicks();
-            } else {
-            char buffer[256];
-                snprintf(buffer, sizeof(buffer), "ProcessUART2Rx: Expected end byte (0xDE), got 0x%02X (Seq: %u)", byte, packetSeqNum);
-                SendUART1Message(buffer);
-                SendUART1Message("UART2:  (4096 integers):");
-                for (uint32_t j = 0; j < SPECTRUM_DATA_SIZE; j += 16) {
-                    snprintf(buffer, sizeof(buffer),
-                             "    %3u, %3u, %3u, %3u, %3u, %3u, %3u, %3u, "
-                             "%3u, %3u, %3u, %3u, %3u, %3u, %3u, %3u",
-                             (unsigned int)spectrumData[j], (unsigned int)spectrumData[j + 1],
-                             (unsigned int)spectrumData[j + 2], (unsigned int)spectrumData[j + 3],
-                             (unsigned int)spectrumData[j + 4], (unsigned int)spectrumData[j + 5],
-                             (unsigned int)spectrumData[j + 6], (unsigned int)spectrumData[j + 7],
-                             (unsigned int)spectrumData[j + 8], (unsigned int)spectrumData[j + 9],
-                             (unsigned int)spectrumData[j + 10], (unsigned int)spectrumData[j + 11],
-                             (unsigned int)spectrumData[j + 12], (unsigned int)spectrumData[j + 13],
-                             (unsigned int)spectrumData[j + 14], (unsigned int)spectrumData[j + 15]);
+        switch (state) {
+            case WAIT_START:
+                if (byte == FPGA_START_BIT) {
+                    state = WAIT_SEQ;
+                    spectrumDataIndex = 0;
+                    spectrumDataReceived = false;
+                    packetStartTime = Timer1_GetTicks();
+                    char buffer[64];
+                    snprintf(buffer, sizeof(buffer), "UART2: Start byte received (0xDA)");
                     SendUART1Message(buffer);
                 }
-                expectingStartByte = true;
+                break;
+
+            case WAIT_SEQ:
+                packetSeqNum = byte;
+                state = WAIT_DATA;
+                spectrumDataIndex = 0;
+                char buffer[64];
+                snprintf(buffer, sizeof(buffer), "UART2: Sequence number received (0x%02X)", packetSeqNum);
+                SendUART1Message(buffer);
+                break;
+
+            case WAIT_DATA:
+                if (spectrumDataIndex < SPECTRUM_DATA_SIZE) {
+                    spectrumData[spectrumDataIndex++] = byte;
+                    if (spectrumDataIndex == SPECTRUM_DATA_SIZE) {
+                        state = WAIT_END;
+                        char buffer[64];
+                        snprintf(buffer, sizeof(buffer), "UART2: Received %u data bytes", SPECTRUM_DATA_SIZE);
+                        SendUART1Message(buffer);
+                    }
+                }
+                break;
+
+            case WAIT_END:
+                if (byte == FPGA_END_BIT) {
+                    spectrumDataReceived = true;
+                    state = WAIT_START;
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "UART2: Complete packet received (Seq: %u, %u bytes)", 
+                             packetSeqNum, SPECTRUM_DATA_SIZE);
+                    SendUART1Message(buffer);
+                    PrintSpectrumData();
+                    lastSpectrumReadTime = Timer1_GetTicks();
+                } else {
+                    char buffer[128];
+                    snprintf(buffer, sizeof(buffer), "got 0x%02X (Seq: %u)", 
+                             byte, packetSeqNum);
+//                    SendUART1Message(buffer);
+                    SendUART1Message("UART2: Partial packet (4096 bytes):");
+                    for (uint32_t j = 0; j < SPECTRUM_DATA_SIZE; j += 16) {
+                        snprintf(buffer, sizeof(buffer),
+                                 "    0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, "
+                                 "0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X",
+                                 spectrumData[j], spectrumData[j + 1], spectrumData[j + 2], spectrumData[j + 3],
+                                 spectrumData[j + 4], spectrumData[j + 5], spectrumData[j + 6], spectrumData[j + 7],
+                                 spectrumData[j + 8], spectrumData[j + 9], spectrumData[j + 10], spectrumData[j + 11],
+                                 spectrumData[j + 12], spectrumData[j + 13], spectrumData[j + 14], spectrumData[j + 15]);
+                        SendUART1Message(buffer);
+                    }
+                    state = WAIT_START;
+                    spectrumDataIndex = 0;
+                    spectrumDataReceived = false;
+                }
+                UART2_ReadAbort();
+                memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
+                UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
+                uart2Processing = false;
+                return;
+
+            default:
+                state = WAIT_START;
                 spectrumDataIndex = 0;
                 spectrumDataReceived = false;
-            }
-            UART2_ReadAbort();
-            memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
-            UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
-            uart2Processing = false;
-            return;
+                SendUART1Message("UART2: Invalid state, resetting");
+                break;
         }
     }
 
@@ -686,6 +699,138 @@ static void ProcessUART2Rx(void) {
     uart2Processing = false;
 }
 
+// UART2 Receive Callback for interrupt-based data processing
+//static void UART2_RxCallback(uintptr_t context) {
+//    static enum {
+//        WAIT_START,
+//        WAIT_SEQ,
+//        WAIT_DATA,
+//        WAIT_END
+//    } state = WAIT_START;
+//
+//    size_t bytesRead = UART2_ReadCountGet();
+//    if (bytesRead == 0) return;
+//
+//    UART_ERROR errors = UART2_ErrorGet();
+//    if (errors != UART_ERROR_NONE) {
+//        char buffer[128];
+//        snprintf(buffer, sizeof(buffer), "UART2: Error 0x%X (Framing: %d, Overrun: %d)", 
+//                 errors, (errors & UART_ERROR_FRAMING) != 0, (errors & UART_ERROR_OVERRUN) != 0);
+//        SendUART1Message(buffer);
+//        
+//        if (errors & UART_ERROR_OVERRUN) {
+//            U2STAbits.OERR = 0; // Clear overrun flag
+//        }
+//        
+//        UART2_ReadAbort();
+//        memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
+//        UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
+//        state = WAIT_START;
+//        spectrumDataIndex = 0;
+//        spectrumDataReceived = false;
+//        expectingStartByte = true;
+//        return;
+//    }
+//
+//    for (size_t i = 0; i < bytesRead; i++) {
+//        uint8_t byte = uart2RxBuffer[i];
+//
+//        if (state != WAIT_START && (Timer1_GetTicks() - packetStartTime > PACKET_TIMEOUT)) {
+//            char buffer[128];
+//            snprintf(buffer, sizeof(buffer), "UART2: Packet timeout in state %d after %u bytes (Seq: %u)", 
+//                     state, spectrumDataIndex, packetSeqNum);
+//            SendUART1Message(buffer);
+//            state = WAIT_START;
+//            spectrumDataIndex = 0;
+//            spectrumDataReceived = false;
+//            UART2_ReadAbort();
+//            memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
+//            UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
+//            return;
+//        }
+//
+//        switch (state) {
+//            case WAIT_START:
+//                if (byte == FPGA_START_BIT) {
+//                    state = WAIT_SEQ;
+//                    spectrumDataIndex = 0;
+//                    spectrumDataReceived = false;
+//                    packetStartTime = Timer1_GetTicks();
+//                    char buffer[64];
+//                    snprintf(buffer, sizeof(buffer), "UART2: Start byte received (0xDA)");
+//                    SendUART1Message(buffer);
+//                }
+//                break;
+//
+//            case WAIT_SEQ:
+//                packetSeqNum = byte;
+//                state = WAIT_DATA;
+//                spectrumDataIndex = 0;
+//                char buffer[64];
+//                snprintf(buffer, sizeof(buffer), "UART2: Sequence number received (0x%02X)", packetSeqNum);
+//                SendUART1Message(buffer);
+//                break;
+//
+//            case WAIT_DATA:
+//                if (spectrumDataIndex < SPECTRUM_DATA_SIZE) {
+//                    spectrumData[spectrumDataIndex++] = byte;
+//                    if (spectrumDataIndex == SPECTRUM_DATA_SIZE) {
+//                        state = WAIT_END;
+//                        char buffer[64];
+//                        snprintf(buffer, sizeof(buffer), "UART2: Received %u data bytes", SPECTRUM_DATA_SIZE);
+//                        SendUART1Message(buffer);
+//                    }
+//                }
+//                break;
+//
+//            case WAIT_END:
+//                if (byte == FPGA_END_BIT) {
+//                    spectrumDataReceived = true;
+//                    state = WAIT_START;
+//                    char buffer[128];
+//                    snprintf(buffer, sizeof(buffer), "UART2: Complete packet received (Seq: %u, %u bytes)", 
+//                             packetSeqNum, SPECTRUM_DATA_SIZE);
+//                    SendUART1Message(buffer);
+//                    PrintSpectrumData();
+//                    lastSpectrumReadTime = Timer1_GetTicks();
+//                } else {
+//                    char buffer[128];
+//                    snprintf(buffer, sizeof(buffer), "UART2: Expected end byte (0xDE), got 0x%02X (Seq: %u)", 
+//                             byte, packetSeqNum);
+//                    SendUART1Message(buffer);
+//                    SendUART1Message("UART2: Partial packet (4096 bytes):");
+//                    for (uint32_t j = 0; j < SPECTRUM_DATA_SIZE; j += 16) {
+//                        snprintf(buffer, sizeof(buffer),
+//                                 "    0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, "
+//                                 "0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X",
+//                                 spectrumData[j], spectrumData[j + 1], spectrumData[j + 2], spectrumData[j + 3],
+//                                 spectrumData[j + 4], spectrumData[j + 5], spectrumData[j + 6], spectrumData[j + 7],
+//                                 spectrumData[j + 8], spectrumData[j + 9], spectrumData[j + 10], spectrumData[j + 11],
+//                                 spectrumData[j + 12], spectrumData[j + 13], spectrumData[j + 14], spectrumData[j + 15]);
+//                        SendUART1Message(buffer);
+//                    }
+//                    state = WAIT_START;
+//                    spectrumDataIndex = 0;
+//                    spectrumDataReceived = false;
+//                }
+//                UART2_ReadAbort();
+//                memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
+//                UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
+//                return;
+//
+//            default:
+//                state = WAIT_START;
+//                spectrumDataIndex = 0;
+//                spectrumDataReceived = false;
+//                SendUART1Message("UART2: Invalid state, resetting");
+//                break;
+//        }
+//    }
+//
+//    UART2_ReadAbort();
+//    memset(uart2RxBuffer, 0, TX_BUFFER_SIZE);
+//    UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
+//}
 // ProcessUserInput (updated delays and buffer clearing)
 static void ProcessUserInput(void) {
     if (uart1RxComplete) {
@@ -933,7 +1078,7 @@ static void ProcessUserInput(void) {
         }
 
         MCP4725_WriteDAC(currentSettings.highVoltage, currentSettings.hvOnOff);
-        AutoSaveSettings();
+//        AutoSaveSettings();
 
 clear_and_read:
         UART1_ReadAbort();
@@ -987,12 +1132,16 @@ int main(void) {
             SYS_Tasks();
         }
     }
-    SendUART1Message("UART2: Initialized for FPGA communication (TX and RX)");
+    // Disable UART2 RX interrupt for polling
+    IEC1bits.U2RXIE = 0; // Disable UART2 RX interrupt
+    IFS1bits.U2RXIF = 0; // Clear interrupt flag
+    SendUART1Message("UART2: Initialized for FPGA communication (polling mode)");
     UART2_Read(uart2RxBuffer, TX_BUFFER_SIZE);
 
-    SendUART1Message("I2C1: Initialized for MCP4725 DAC");
+
+    SendUART1Message("I2C2: Initialized for MCP4725 DAC");
     I2C_TRANSFER_SETUP setup = { .clkSpeed = 100000 };
-    I2C1_TransferSetup(&setup, 0);
+    I2C2_TransferSetup(&setup, 0);
 
     EEPROM_CS_HIGH();
     SPI_TRANSFER_SETUP spiSetup = {
@@ -1001,35 +1150,35 @@ int main(void) {
         .clockPhase = SPI_CLOCK_PHASE_LEADING_EDGE,
         .dataBits = SPI_DATA_BITS_8
     };
-    if (SPI1_TransferSetup(&spiSetup, 0)) {
-        SendUART1Message("SPI1: Initialized for EEPROM (2MHz, Mode 1)");
+    if (SPI2_TransferSetup(&spiSetup, 0)) {
+        SendUART1Message("SPI2: Initialized for EEPROM (2MHz, Mode 1)");
     }
 
     if (MCP4725_WriteDAC(0, 0)) {
         SendUART1Message("MCP4725 DAC: Detected and initialized to 0V");
     }
 
-    SendUART1Message("Testing EEPROM at address 0x1000...");
-    uint8_t testData[4] = {0x55, 0x55, 0x55, 0x55};
-    if (EEPROM_WriteBytes(0x1000, testData, 4)) {
-        SendUART1Message("EEPROM Test Write: 0x55 0x55 0x55 0x55 at 0x1000");
-    } else {
-        SendUART1Message("EEPROM Test Write Failed");
-    }
-    uint8_t readData[4];
-    if (EEPROM_ReadBytes(0x1000, readData, 4)) {
-        char hex[50];
-        snprintf(hex, sizeof(hex), "EEPROM Test Read: %02X %02X %02X %02X",
-                 readData[0], readData[1], readData[2], readData[3]);
-        SendUART1Message(hex);
-        if (memcmp(testData, readData, 4) == 0) {
-            SendUART1Message("EEPROM: Test passed - read/write working correctly");
-        } else {
-            SendUART1Message("EEPROM: Test failed - data mismatch");
-        }
-    } else {
-        SendUART1Message("EEPROM Test Read Failed");
-    }
+//    SendUART1Message("Testing EEPROM at address 0x1000...");
+//    uint8_t testData[4] = {0x55, 0x55, 0x55, 0x55};
+//    if (EEPROM_WriteBytes(0x1000, testData, 4)) {
+//        SendUART1Message("EEPROM Test Write: 0x55 0x55 0x55 0x55 at 0x1000");
+//    } else {
+//        SendUART1Message("EEPROM Test Write Failed");
+//    }
+//    uint8_t readData[4];
+//    if (EEPROM_ReadBytes(0x1000, readData, 4)) {
+//        char hex[50];
+//        snprintf(hex, sizeof(hex), "EEPROM Test Read: %02X %02X %02X %02X",
+//                 readData[0], readData[1], readData[2], readData[3]);
+//        SendUART1Message(hex);
+//        if (memcmp(testData, readData, 4) == 0) {
+//            SendUART1Message("EEPROM: Test passed - read/write working correctly");
+//        } else {
+//            SendUART1Message("EEPROM: Test failed - data mismatch");
+//        }
+//    } else {
+//        SendUART1Message("EEPROM Test Read Failed");
+//    }
 
     if (!initialize_mcp2200()) {
         SendUART1Message("Failed to initialize MCP2200, halting...");
@@ -1045,11 +1194,11 @@ int main(void) {
         memset(&lastSavedSettings, 0, sizeof(Settings_t));
     }
 
-    SendUART1Message("USB Communication via MCP2200 Established");
-    SendUART1Message("Enter: MODE,TIME,COUNTS,START,END,CH,LLD,ULD,CG,FG,POL,THR,RISE,FLAT,PZ,BLR,PUR,HV(0-1000V),HVON [MCA:DWELL]");
-    SendUART1Message("Commands: START, STOP, RESET, LOAD, INFO");
-    SendUART1Message("Settings auto-save to EEPROM on change. Use 'LOAD' to restore previous settings.");
-    SendUART1Message("Spectrum data (4096 bytes) printed when complete packet received (0xDA ... 0xDE).");
+//    SendUART1Message("USB Communication via MCP2200 Established");
+//    SendUART1Message("Enter: MODE,TIME,COUNTS,START,END,CH,LLD,ULD,CG,FG,POL,THR,RISE,FLAT,PZ,BLR,PUR,HV(0-1000V),HVON [MCA:DWELL]");
+//    SendUART1Message("Commands: START, STOP, RESET, LOAD, INFO");
+//    SendUART1Message("Settings auto-save to EEPROM on change. Use 'LOAD' to restore previous settings.");
+//    SendUART1Message("Spectrum data (4096 bytes) printed when complete packet received (0xDA ... 0xDE).");
     UART1_Read(uart1RxBuffer, RX_BUFFER_SIZE);
     SendUART1Message("UART1: Waiting for input over USB...");
 

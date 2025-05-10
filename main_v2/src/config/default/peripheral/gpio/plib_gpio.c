@@ -62,22 +62,20 @@ void GPIO_Initialize ( void )
     ANSELACLR = 0x1; /* Digital Mode Enable */
 
     /* PORTB Initialization */
-    ANSELBCLR = 0x800e; /* Digital Mode Enable */
+    ANSELBCLR = 0xc; /* Digital Mode Enable */
 
     /* PORTC Initialization */
-    ANSELCCLR = 0x2; /* Digital Mode Enable */
 
 
 
     /* PPS Input Remapping */
     U1RXR = 2;
     U2RXR = 3;
-    SDI2R = 6;
+    SDI1R = 6;
 
     /* PPS Output Remapping */
     RPA0R = 1;
     RPB10R = 2;
-    RPB1R = 4;
 
 
 }

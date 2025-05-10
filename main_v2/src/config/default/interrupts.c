@@ -66,10 +66,10 @@
 // Section: System Interrupt Vector declarations
 // *****************************************************************************
 // *****************************************************************************
-void SPI_1_Handler (void);
 void UART_1_Handler (void);
-void I2C_1_Handler (void);
+void SPI_2_Handler (void);
 void UART_2_Handler (void);
+void I2C_2_Handler (void);
 
 
 // *****************************************************************************
@@ -77,24 +77,24 @@ void UART_2_Handler (void);
 // Section: System Interrupt Vector definitions
 // *****************************************************************************
 // *****************************************************************************
-void __attribute__((used)) __ISR(_SPI_1_VECTOR, ipl1SOFT) SPI_1_Handler (void)
-{
-    SPI_1_InterruptHandler();
-}
-
 void __attribute__((used)) __ISR(_UART_1_VECTOR, ipl1SOFT) UART_1_Handler (void)
 {
     UART_1_InterruptHandler();
 }
 
-void __attribute__((used)) __ISR(_I2C_1_VECTOR, ipl1SOFT) I2C_1_Handler (void)
+void __attribute__((used)) __ISR(_SPI_2_VECTOR, ipl1SOFT) SPI_2_Handler (void)
 {
-    I2C_1_InterruptHandler();
+    SPI_2_InterruptHandler();
 }
 
 void __attribute__((used)) __ISR(_UART_2_VECTOR, ipl1SOFT) UART_2_Handler (void)
 {
     UART_2_InterruptHandler();
+}
+
+void __attribute__((used)) __ISR(_I2C_2_VECTOR, ipl1SOFT) I2C_2_Handler (void)
+{
+    I2C_2_InterruptHandler();
 }
 
 

@@ -48,13 +48,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "peripheral/i2c/master/plib_i2c1_master.h"
+#include "peripheral/i2c/master/plib_i2c2_master.h"
 #include "peripheral/uart/plib_uart1.h"
 #include "peripheral/uart/plib_uart2.h"
 #include "peripheral/clk/plib_clk.h"
 #include "peripheral/gpio/plib_gpio.h"
 #include "peripheral/evic/plib_evic.h"
-#include "peripheral/spi/spi_master/plib_spi1_master.h"
+#include "peripheral/spi/spi_master/plib_spi2_master.h"
 
 // DOM-IGNORE-BEGIN
 #ifdef __cplusplus  // Provide C++ Compatibility

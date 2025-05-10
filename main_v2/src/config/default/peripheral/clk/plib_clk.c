@@ -90,7 +90,7 @@ void CLK_Initialize( void )
     PMD2 = 0x7U;
     PMD3 = 0x1f001fU;
     PMD4 = 0x1fU;
-    PMD5 = 0x1020200U;
+    PMD5 = 0x1010100U;
     PMD6 = 0x10001U;
 
     /* Code for fuse settings can be found in "initialization.c" */
